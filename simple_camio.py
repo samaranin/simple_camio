@@ -9,61 +9,8 @@ import pyglet.media
 from collections import deque
 from simple_camio_3d import SIFTModelDetector, InteractionPolicyOBJ, CamIOPlayerOBJ
 from simple_camio_2d import InteractionPolicy2D, CamIOPlayer2D, ModelDetectorAruco, parse_aruco_codes, get_aruco_dict_id_from_string, sort_corners_by_id
-from simple_camio_mp import ModelDetectorArucoMP, PoseDetectorMP
+from simple_camio_mp import ModelDetectorArucoMP, PoseDetectorMP, SIFTModelDetectorMP
 from simple_camio_mp_3d import PoseDetectorMP3D, InteractionPolicyOBJObject
-
-
-# The PoseDetector class determines the pose of the pointer, and returns the
-# position of the tip in the coordinate system of the model.
-class PoseDetector:
-    def __init__(self, model, intrinsic_matrix):
-        # Parse the Aruco markers placement positions from the parameter file into a numpy array, and get the associated ids
-        self.stylus = self.load_stylus_parameters(model['stylus_file'])
-        self.obj, self.list_of_ids = parse_aruco_codes(self.stylus['positioningData']['arucoCodes'])
-        self.aruco_dict = cv.aruco.Dictionary_get(get_aruco_dict_id_from_string(self.stylus['positioningData']['arucoType']))
-        self.arucoParams = cv.aruco.DetectorParameters_create()
-        self.arucoParams.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX
-        self.intrinsic_matrix = intrinsic_matrix
-
-    # Function to load stylus parameters from a JSON file
-    def load_stylus_parameters(self, filename):
-        if os.path.isfile(filename):
-            with open(filename, 'r') as f:
-                stylus_params = json.load(f)
-                print("loaded stylus parameters from file.")
-        else:
-            print("No stylus parameters file found.")
-            exit(0)
-        return stylus_params['stylus']
-
-    # Main function to detect aruco markers in the image and use solvePnP to determine the pose
-    def detect(self, frame, rvec_model, tvec_model):
-        corners, ids, _ = cv.aruco.detectMarkers(frame, self.aruco_dict, parameters=self.arucoParams)
-        scene, use_index = sort_corners_by_id(corners, ids, self.list_of_ids)
-        if ids is None or not any(use_index):
-            print("No pointer detected.")
-            return None
-        retval, self.rvec_aruco, self.tvec_aruco = cv.solvePnP(self.obj[use_index, :], scene[use_index, :], self.intrinsic_matrix, None)
-
-        # Get pointer location in coordinates of the aruco markers
-        point_of_interest = self.reverse_project(self.tvec_aruco, rvec_model, tvec_model)
-        return point_of_interest
-
-    # Draw a green dot on the origin to denote where the pointer is pointing
-    def drawOrigin(self, img_scene, color=(0, 255, 0)):
-        backprojection_pt, other = cv.projectPoints(np.array([0, 0, 0], dtype=np.float32).reshape(1, 3),
-                                                    self.rvec_aruco, self.tvec_aruco, self.intrinsic_matrix, None)
-        cv.circle(img_scene, (int(backprojection_pt[0, 0, 0]), int(backprojection_pt[0, 0, 1])), 2, color, 2)
-        return img_scene
-
-    # Function to reverse the projection of a point given a rvec and tvec
-    def reverse_project(self, point, rvec, tvec):
-        poi = np.matrix(point)
-        R, _ = cv.Rodrigues(rvec)
-        R_mat = np.matrix(R)
-        R_inv = np.linalg.inv(R_mat)
-        T = np.matrix(tvec)
-        return np.array(R_inv * (poi - T))
 
 
 class MovementFilter:
@@ -272,12 +219,12 @@ def load_map_parameters(filename):
 
 
 parser = argparse.ArgumentParser(description='Code for CamIO.')
-parser.add_argument('--input1', help='Path to parameter json file.', default='models/house_3d/house.json')
+parser.add_argument('--input1', help='Path to parameter json file.', default='models/RivneMap/RivneMap.json')
 args = parser.parse_args()
 
 # Load map and camera parameters
 model = load_map_parameters(args.input1)
-if model["modelType"] != "mediapipe":
+if model["modelType"] != "mediapipe" and model["modelType"] != "sift_2d_mediapipe":
     intrinsic_matrix = load_camera_parameters('camera_parameters.json')
 
 # ========================================
@@ -285,12 +232,11 @@ cam_port = select_cam_port()
 # ========================================
 
 # Initialize objects
-if model["modelType"] == "2D":
-    model_detector = ModelDetectorAruco(model, intrinsic_matrix)
-    pose_detector = PoseDetector(model, intrinsic_matrix)
+if model["modelType"] == "sift_2d_mediapipe":
+    model_detector = SIFTModelDetectorMP(model)
+    pose_detector = PoseDetectorMP(model)
     gesture_detector = GestureDetector()
     motion_filter = MovementMedianFilter()
-    image_annotator = ImageAnnotator(intrinsic_matrix)
     interact = InteractionPolicy2D(model)
     camio_player = CamIOPlayer2D(model)
     camio_player.play_welcome()
@@ -404,15 +350,15 @@ while cap.isOpened():
     # Annotate image with 3D points and axes
     if model["modelType"] == "2D":
         img_scene_color = image_annotator.annotate_image(img_scene_color, model_detector.obj, rvec, tvec)
-    elif model["modelType"] != "mediapipe":
+    elif model["modelType"] != "mediapipe" and model["modelType"] != "sift_2d_mediapipe":
         img_scene_color = image_annotator.annotate_image(img_scene_color, [], rvec, tvec)
 
-    if model["modelType"] == "mediapipe":
+    if model["modelType"] == "mediapipe" or model["modelType"] == "sift_2d_mediapipe":
         gesture_loc, gesture_status, img_scene_color = pose_detector.detect(frame, rvec, tvec)
         if gesture_loc is None:
             heartbeat_player.pause_sound()
             continue
-
+        gesture_loc = gesture_loc / model["pixels_per_cm"]
         heartbeat_player.play_sound()
     elif model["modelType"] == "mediapipe_3d" or model['modelType'] == "mediapipe_3d_object":
         interact.project_vertices(rvec, tvec)
@@ -444,7 +390,7 @@ while cap.isOpened():
     if gesture_status != "moving":
         if model['modelType'] == "mediapipe_3d" or model['modelType'] == "mediapipe_3d_object":
             img_scene_color = image_annotator.draw_point_in_image(img_scene_color, gesture_loc)
-        elif model['modelType'] != "mediapipe":
+        elif model['modelType'] != "mediapipe" and model["modelType"] != "sift_2d_mediapipe":
             img_scene_color = image_annotator.draw_points_in_image(img_scene_color, gesture_loc, rvec, tvec)
 
     # Determine zone from point of interest

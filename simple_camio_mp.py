@@ -129,3 +129,79 @@ class InteractionPolicyMP:
             return zone
         else:
             return -1
+
+
+class SIFTModelDetectorMP:
+    def __init__(self, model):
+        self.model = model
+        # Load the template image
+        img_object = cv.imread(
+            model["template_image"], cv.IMREAD_GRAYSCALE
+        )
+
+        # Detect SIFT keypoints
+        self.detector = cv.SIFT_create()
+        self.keypoints_obj, self.descriptors_obj = self.detector.detectAndCompute(
+            img_object, mask=None
+        )
+        self.requires_homography = True
+        self.H = None
+        self.MIN_INLIER_COUNT = 40
+
+    def detect(self, frame):
+        # If we have already computed the coordinate transform then simply return it
+        if not self.requires_homography:
+            return True, self.H, None
+        keypoints_scene, descriptors_scene = self.detector.detectAndCompute(frame, None)
+        matcher = cv.DescriptorMatcher_create(cv.DescriptorMatcher_FLANNBASED)
+        knn_matches = matcher.knnMatch(self.descriptors_obj, descriptors_scene, 2)
+
+        # Only keep uniquely good matches
+        RATIO_THRESH = 0.75
+        good_matches = []
+        for m, n in knn_matches:
+            if m.distance < RATIO_THRESH * n.distance:
+                good_matches.append(m)
+        print("There were {} good matches".format(len(good_matches)))
+        # -- Localize the object
+        if len(good_matches) < 4:
+            return False, None, None
+        obj = np.empty((len(good_matches), 2), dtype=np.float32)
+        self.scene = np.empty((len(good_matches), 2), dtype=np.float32)
+        for i in range(len(good_matches)):
+            # -- Get the keypoints from the good matches
+            obj[i, 0] = self.keypoints_obj[good_matches[i].queryIdx].pt[0]
+            obj[i, 1] = self.keypoints_obj[good_matches[i].queryIdx].pt[1]
+            self.scene[i, 0] = keypoints_scene[good_matches[i].trainIdx].pt[0]
+            self.scene[i, 1] = keypoints_scene[good_matches[i].trainIdx].pt[1]
+        # Compute homography and find inliers
+        H, self.mask_out = cv.findHomography(
+            self.scene, obj, cv.RANSAC, ransacReprojThreshold=8.0, confidence=0.995
+        )
+        total = sum([int(i) for i in self.mask_out])
+        obj_in = np.empty((total,2),dtype=np.float32)
+        scene_in = np.empty((total,2),dtype=np.float32)
+        index = 0
+        for i in range(len(self.mask_out)):
+            if self.mask_out[i]:
+                obj_in[index,:] = obj[i,:]
+                scene_in[index,:] = self.scene[i,:]
+                index += 1
+        scene_out = np.squeeze(cv.perspectiveTransform(scene_in.reshape(-1,1,2), H))
+        biggest_distance = 0
+        sum_distance = 0
+        for i in range(len(scene_out)):
+            dist = cv.norm(obj_in[i,:],scene_out[i,:],cv.NORM_L2)
+            sum_distance += dist
+            if dist > biggest_distance:
+                biggest_distance = dist
+        ave_dist = sum_distance/total
+        print(f'Inlier count: {total}. Biggest distance: {biggest_distance}. Average distance: {ave_dist}.')
+        if total > self.MIN_INLIER_COUNT:
+            self.H = H
+            self.requires_homography = False
+            return True, H, None
+        elif self.H is not None:
+            return True, self.H, None
+        else:
+            return False, None, None
