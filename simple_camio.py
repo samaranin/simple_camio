@@ -141,21 +141,6 @@ def list_ports():
     return available_ports, working_ports, non_working_ports
 
 
-# Function to load camera intrinsic parameters from a JSON file
-def load_camera_parameters(filename):
-    if os.path.isfile(filename):
-        with open(filename, 'r') as f:
-            cam_params = json.load(f)
-            print("loaded camera parameters from file.")
-    else:
-        print("No camera parameters file found. Please run simple_calibration.py script.")
-        exit(0)
-    intrinsic_matrix = np.array([[cam_params['focal_length_x'], 0.0, cam_params['camera_center_x']],
-                                 [0.00000000e+00, cam_params['focal_length_y'], cam_params['camera_center_y']],
-                                 [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]], dtype=np.float32)
-    return intrinsic_matrix
-
-
 # Function to load map parameters from a JSON file
 def load_map_parameters(filename):
     if os.path.isfile(filename):
@@ -178,8 +163,6 @@ args = parser.parse_args()
 
 # Load map and camera parameters
 model = load_map_parameters(args.input1)
-if model["modelType"] != "mediapipe" and model["modelType"] != "sift_2d_mediapipe":
-    intrinsic_matrix = load_camera_parameters('camera_parameters.json')
 
 # ========================================
 cam_port = select_cam_port()

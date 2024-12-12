@@ -1,4 +1,4 @@
-mediapipe==0.9.1.0
+mediapipe==0.10.11.0
 numpy==1.26.4
 opencv_contrib_python==4.6.0.66
 pyglet==2.0.9
