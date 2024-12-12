@@ -2,30 +2,6 @@ import numpy as np
 import cv2 as cv
 import mediapipe as mp
 from scipy import stats
-from simple_camio_2d import parse_aruco_codes, get_aruco_dict_id_from_string, sort_corners_by_id
-
-
-class ModelDetectorArucoMP:
-    def __init__(self, model):
-        # Parse the Aruco markers placement positions from the parameter file into a numpy array, and get the associated ids
-        self.obj, self.list_of_ids = parse_aruco_codes(model['positioningData']['arucoCodes'])
-        # Define aruco marker dictionary and parameters object to include subpixel resolution
-        self.aruco_dict_scene = cv.aruco.Dictionary_get(
-            get_aruco_dict_id_from_string(model['positioningData']['arucoType']))
-        self.arucoParams = cv.aruco.DetectorParameters_create()
-        self.arucoParams.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX
-
-    def detect(self, frame):
-        # Detect the markers in the frame
-        (corners, ids, rejected) = cv.aruco.detectMarkers(frame, self.aruco_dict_scene, parameters=self.arucoParams)
-        scene, use_index = sort_corners_by_id(corners, ids, self.list_of_ids)
-        if ids is None or not any(use_index):
-            print("No markers found.")
-            return False, None, None
-
-        # Run solvePnP using the markers that have been observed to determine the pose
-        H, mask_out = cv.findHomography(scene[use_index, :], self.obj[use_index, :2], cv.RANSAC, ransacReprojThreshold=8.0, confidence=0.995)
-        return True, H, None
 
 
 class PoseDetectorMP:

@@ -5,34 +5,6 @@ from scipy import stats
 import cv2 as cv
 
 
-# The ModelDetector class is responsible for detecting the Aruco markers in
-# the image that make up the model, and determining the pose of the model in
-# the scene.
-
-class ModelDetectorAruco:
-    def __init__(self, model, intrinsic_matrix):
-        # Parse the Aruco markers placement positions from the parameter file into a numpy array, and get the associated ids
-        self.obj, self.list_of_ids = parse_aruco_codes(model['positioningData']['arucoCodes'])
-        # Define aruco marker dictionary and parameters object to include subpixel resolution
-        self.aruco_dict_scene = cv.aruco.Dictionary_get(
-            get_aruco_dict_id_from_string(model['positioningData']['arucoType']))
-        self.arucoParams = cv.aruco.DetectorParameters_create()
-        self.arucoParams.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX
-        self.intrinsic_matrix = intrinsic_matrix
-
-    def detect(self, frame):
-        # Detect the markers in the frame
-        (corners, ids, rejected) = cv.aruco.detectMarkers(frame, self.aruco_dict_scene, parameters=self.arucoParams)
-        scene, use_index = sort_corners_by_id(corners, ids, self.list_of_ids)
-        if ids is None or not any(use_index):
-            print("No markers found.")
-            return False, None, None
-
-        # Run solvePnP using the markers that have been observed to determine the pose
-        retval, rvec, tvec = cv.solvePnP(self.obj[use_index, :], scene[use_index, :], self.intrinsic_matrix, None)
-        return retval, rvec, tvec
-
-
 # The InteractionPolicy class takes the position and determines where on the
 # map it is, finding the color of the zone, if any, which is decoded into
 # zone ID number. This zone ID number is filtered through a ring buffer that
@@ -148,47 +120,3 @@ class CamIOPlayer2D:
                     print("Exception raised. Cannot play sound. Please restart the application.")
             self.prev_zone_name = zone_name
 
-
-# Function to sort corners by id based on the order specified in the id_list,
-# such that the scene array matches the obj array in terms of aruco marker ids
-# and the appropriate corners.
-def sort_corners_by_id(corners, ids, id_list):
-    use_index = np.zeros(len(id_list) * 4, dtype=bool)
-    scene = np.empty((len(id_list) * 4, 2), dtype=np.float32)
-    for i in range(len(corners)):
-        id = ids[i, 0]
-        if id in id_list:
-            corner_num = id_list.index(id)
-            for j in range(4):
-                use_index[4 * corner_num + j] = True
-                scene[4 * corner_num + j, :] = corners[i][0][j]
-    return scene, use_index
-
-
-# Parses the list of aruco codes and returns the 2D points and ids
-def parse_aruco_codes(list_of_aruco_codes):
-    obj_array = np.empty((len(list_of_aruco_codes) * 4, 3), dtype=np.float32)
-    ids = []
-    for cnt, aruco_code in enumerate(list_of_aruco_codes):
-        for i in range(4):
-            obj_array[cnt * 4 + i, :] = aruco_code['position'][i]
-        ids.append(aruco_code['id'])
-    return obj_array, ids
-
-
-# Returns the dictionary code for the given string
-def get_aruco_dict_id_from_string(aruco_dict_string):
-    if aruco_dict_string == "DICT_4X4_50":
-        return cv.aruco.DICT_4X4_50
-    elif aruco_dict_string == "DICT_4X4_100":
-        return cv.aruco.DICT_4X4_100
-    elif aruco_dict_string == "DICT_4X4_250":
-        return cv.aruco.DICT_4X4_250
-    elif aruco_dict_string == "DICT_4X4_1000":
-        return cv.aruco.DICT_4X4_1000
-    elif aruco_dict_string == "DICT_5X5_50":
-        return cv.aruco.DICT_5X5_50
-    elif aruco_dict_string == "DICT_5X5_100":
-        return cv.aruco.DICT_5X5_100
-    elif aruco_dict_string == "DICT_5X5_250":
-        return cv.aruco.DICT_5X5_250

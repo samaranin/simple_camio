@@ -2,6 +2,7 @@
     "model":{
       "name":"UkraineMap Example",
       "filename":"models/UkraineMap/UkraineMap.png",
+      "template_image": "models/UkraineMap/template.png",
       "map_description":"models/UkraineMap/Audio/Kyiv Description.mp3",
       "blipsound":"MP3/quick_blip.wav",
       "welcome_message":"MP3/welcome.mp3",
@@ -10,16 +11,7 @@
       "crickets": "MP3/crickets.mp3",
       "pixels_per_cm": 118.49,
       "stylus_file": "teardrop_stylus.json",
-      "modelType": "mediapipe",
-      "positioningData":{
-        "arucoType": "DICT_4X4_50",
-        "arucoCodes":[
-          {"position": [[0,0,0], [2,0,0], [2,2,0],[0,2,0]], "id":0},
-          {"position": [[17,0,0], [19,0,0], [19,2,0],[17,2,0]], "id":1},
-          {"position": [[0,24,0], [2,24,0], [2,26,0],[0,26,0]], "id":2},
-          {"position": [[17,24,0], [19,24,0], [19,26,0],[17,26,0]], "id":3}
-        ]
-      },
+      "modelType": "sift_2d_mediapipe",
       "hotspots":[
         {"color":[255,0,0], "colorComment":"red", "textDescription":"Khreschatyk St.", "audioDescription":"models/UkraineMap/Audio/Khreschyatik.mp3"},
         {"color":[253,167,0], "colorComment":"orange", "textDescription":"Mykhailivs'ka St.", "audioDescription":"models/UkraineMap/Audio/Mikhaylivska St.mp3"},

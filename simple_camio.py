@@ -7,10 +7,9 @@ import json
 import argparse
 import pyglet.media
 from collections import deque
-from simple_camio_3d import SIFTModelDetector, InteractionPolicyOBJ, CamIOPlayerOBJ
-from simple_camio_2d import InteractionPolicy2D, CamIOPlayer2D, ModelDetectorAruco, parse_aruco_codes, get_aruco_dict_id_from_string, sort_corners_by_id
-from simple_camio_mp import ModelDetectorArucoMP, PoseDetectorMP, SIFTModelDetectorMP
-from simple_camio_mp_3d import PoseDetectorMP3D, InteractionPolicyOBJObject
+from simple_camio_2d import InteractionPolicy2D, CamIOPlayer2D
+from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP
+
 
 
 class MovementFilter:
@@ -102,51 +101,6 @@ class AmbientSoundPlayer:
             self.player.pause()
 
 
-class ImageAnnotator:
-    def __init__(self, intrinsic_matrix):
-        self.intrinsic_matrix = intrinsic_matrix
-
-    # Draws the axes on the image
-    def drawAxes(self, img, imgpts):
-        imgpts = imgpts.astype(int)
-        corner = tuple(imgpts[3].ravel())
-        img = cv.line(img, corner, tuple(imgpts[0].ravel()), (255, 0, 0), 5)
-        img = cv.line(img, corner, tuple(imgpts[1].ravel()), (0, 255, 0), 5)
-        img = cv.line(img, corner, tuple(imgpts[2].ravel()), (0, 0, 255), 5)
-        return img
-
-    # Draws axes and projects the 3D points onto the image
-    def draw_points_in_image(self, img_scene_color, obj, rvec, tvec):
-        # Draws the 3D points on the image
-        backprojection_pts, other = cv.projectPoints(obj, rvec, tvec, self.intrinsic_matrix, None)
-        for pts in backprojection_pts:
-            cv.circle(img_scene_color, (int(pts[0, 0]), int(pts[0, 1])), 4, (255, 255, 255), 2)
-        return img_scene_color
-
-    # Draws axes and projects the 3D points onto the image
-    def draw_point_in_image(self, img_scene_color, obj):
-        # Draws the 3D points on the image
-        cv.circle(img_scene_color, (int(obj[0]), int(obj[1])), 4, (255, 255, 255), 2)
-        return img_scene_color
-
-    # Draws axes and projects the 3D points onto the image
-    def annotate_image(self, img_scene_color, obj, rvec, tvec):
-        # Draws the 3D points on the image
-        if len(obj) > 0:
-            backprojection_pts, other = cv.projectPoints(obj, rvec, tvec, self.intrinsic_matrix, None)
-            for idx, pts in enumerate(backprojection_pts):
-                cv.circle(img_scene_color, (int(pts[0, 0]), int(pts[0, 1])), 4, (255, 255, 255), 2)
-                cv.line(img_scene_color, (int(pts[0, 0] - 1), int(pts[0, 1])), (int(pts[0, 0]) + 1, int(pts[0, 1])),
-                        (255, 0, 0), 1)
-                cv.line(img_scene_color, (int(pts[0, 0]), int(pts[0, 1]) - 1), (int(pts[0, 0]), int(pts[0, 1]) + 1),
-                        (255, 0, 0), 1)
-            # Draw axes on the image
-        axis = np.float32([[6, 0, 0], [0, 6, 0], [0, 0, -6], [0, 0, 0]]).reshape(-1, 3)
-        axis_pts, other = cv.projectPoints(axis, rvec, tvec, self.intrinsic_matrix, None)
-        img_scene_color = self.drawAxes(img_scene_color, axis_pts)
-        return img_scene_color
-
-
 def select_cam_port():
     available_ports, working_ports, non_working_ports = list_ports()
     if len(working_ports) == 1:
@@ -219,7 +173,7 @@ def load_map_parameters(filename):
 
 
 parser = argparse.ArgumentParser(description='Code for CamIO.')
-parser.add_argument('--input1', help='Path to parameter json file.', default='models/RivneMap/RivneMap.json')
+parser.add_argument('--input1', help='Path to parameter json file.', default='models/UkraineMap/UkraineMap.json')
 args = parser.parse_args()
 
 # Load map and camera parameters
@@ -242,59 +196,8 @@ if model["modelType"] == "sift_2d_mediapipe":
     camio_player.play_welcome()
     crickets_player = AmbientSoundPlayer(model['crickets'])
     heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
-elif model["modelType"] == "3D":
-    model_detector = SIFTModelDetector(model, intrinsic_matrix)
-    pose_detector = PoseDetector(model, intrinsic_matrix)
-    gesture_detector = GestureDetector()
-    motion_filter = MovementMedianFilter()
-    image_annotator = ImageAnnotator(intrinsic_matrix)
-    interact = InteractionPolicyOBJ(model, intrinsic_matrix)
-    camio_player = CamIOPlayerOBJ(model)
-    camio_player.play_welcome()
-    crickets_player = AmbientSoundPlayer(model['crickets'])
-    heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
-elif model["modelType"] == "aruco_3d":
-    model_detector = ModelDetectorAruco(model, intrinsic_matrix)
-    pose_detector = PoseDetector(model, intrinsic_matrix)
-    gesture_detector = GestureDetector()
-    motion_filter = MovementMedianFilter()
-    image_annotator = ImageAnnotator(intrinsic_matrix)
-    interact = InteractionPolicyOBJ(model, intrinsic_matrix)
-    camio_player = CamIOPlayerOBJ(model)
-    camio_player.play_welcome()
-    crickets_player = AmbientSoundPlayer(model['crickets'])
-    heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
-elif model["modelType"] == "mediapipe":
-    model_detector = ModelDetectorArucoMP(model)
-    pose_detector = PoseDetectorMP(model)
-    motion_filter = MovementMedianFilter()
-    interact = InteractionPolicy2D(model)
-    camio_player = CamIOPlayer2D(model)
-    camio_player.play_welcome()
-    crickets_player = AmbientSoundPlayer(model['crickets'])
-    heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
-elif model["modelType"] == "mediapipe_3d":
-    model_detector = SIFTModelDetector(model, intrinsic_matrix)
-    pose_detector = PoseDetectorMP3D()
-    gesture_detector = GestureDetector()
-    motion_filter = MovementMedianFilter()
-    image_annotator = ImageAnnotator(intrinsic_matrix)
-    interact = InteractionPolicyOBJ(model, intrinsic_matrix)
-    camio_player = CamIOPlayerOBJ(model)
-    camio_player.play_welcome()
-    crickets_player = AmbientSoundPlayer(model['crickets'])
-    heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
-elif model["modelType"] == "mediapipe_3d_object":
-    model_detector = ModelDetectorAruco(model, intrinsic_matrix)
-    pose_detector = PoseDetectorMP3D()
-    gesture_detector = GestureDetector()
-    motion_filter = MovementMedianFilter()
-    image_annotator = ImageAnnotator(intrinsic_matrix)
-    interact = InteractionPolicyOBJObject(model, intrinsic_matrix)
-    camio_player = CamIOPlayerOBJ(model)
-    camio_player.play_welcome()
-    crickets_player = AmbientSoundPlayer(model['crickets'])
-    heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
+
+
 heartbeat_player.set_volume(.05)
 cap = cv.VideoCapture(cam_port)
 cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)  # set camera image height
@@ -317,8 +220,8 @@ while cap.isOpened():
             cap.release()
             cv.destroyAllWindows()
             break
-        if waitkey == ord('r'):
-            model_detector.requires_pnp = True
+        if waitkey == ord('h'):
+            model_detector.requires_homography = True
         if waitkey == ord('b'):
             camio_player.enable_blips = not camio_player.enable_blips
             if camio_player.enable_blips:
@@ -337,7 +240,7 @@ while cap.isOpened():
     # load images grayscale
     img_scene_gray = cv.cvtColor(img_scene_color, cv.COLOR_BGR2GRAY)
     # Detect aruco markers for map in image
-    retval, rvec, tvec = model_detector.detect(img_scene_gray)
+    retval, H, tvec = model_detector.detect(img_scene_gray)
 
     # If no  markers found, continue to next iteration
     if not retval:
@@ -347,51 +250,13 @@ while cap.isOpened():
 
     camio_player.play_description()
     crickets_player.pause_sound()
-    # Annotate image with 3D points and axes
-    if model["modelType"] == "2D":
-        img_scene_color = image_annotator.annotate_image(img_scene_color, model_detector.obj, rvec, tvec)
-    elif model["modelType"] != "mediapipe" and model["modelType"] != "sift_2d_mediapipe":
-        img_scene_color = image_annotator.annotate_image(img_scene_color, [], rvec, tvec)
 
-    if model["modelType"] == "mediapipe" or model["modelType"] == "sift_2d_mediapipe":
-        gesture_loc, gesture_status, img_scene_color = pose_detector.detect(frame, rvec, tvec)
-        if gesture_loc is None:
-            heartbeat_player.pause_sound()
-            continue
-        gesture_loc = gesture_loc / model["pixels_per_cm"]
-        heartbeat_player.play_sound()
-    elif model["modelType"] == "mediapipe_3d" or model['modelType'] == "mediapipe_3d_object":
-        interact.project_vertices(rvec, tvec)
-        gesture_loc, gesture_status, img_scene_color = pose_detector.detect(frame)
-        img_scene_color = image_annotator.annotate_image(img_scene_color, [], rvec, tvec)
-        if model['modelType'] == "mediapipe_3d_object":
-            img_scene_color = interact.draw_points(img_scene_color)
-        if gesture_loc is None:
-            heartbeat_player.pause_sound()
-            continue
-
-        heartbeat_player.play_sound()
-    else:
-        # Detect aruco marker for pointer in image
-        point_of_interest = pose_detector.detect(img_scene_gray, rvec, tvec)
-
-        # If no pointer is detected, move on to the next frame
-        if point_of_interest is None:
-            heartbeat_player.pause_sound()
-            continue
-
-        heartbeat_player.play_sound()
-        # Draw where the user was pointing
-        img_scene_color = pose_detector.drawOrigin(img_scene_color)
-
-        # Determine if the user is trying to make a gesture
-        gesture_loc, gesture_status = gesture_detector.push_position(point_of_interest)
-
-    if gesture_status != "moving":
-        if model['modelType'] == "mediapipe_3d" or model['modelType'] == "mediapipe_3d_object":
-            img_scene_color = image_annotator.draw_point_in_image(img_scene_color, gesture_loc)
-        elif model['modelType'] != "mediapipe" and model["modelType"] != "sift_2d_mediapipe":
-            img_scene_color = image_annotator.draw_points_in_image(img_scene_color, gesture_loc, rvec, tvec)
+    gesture_loc, gesture_status, img_scene_color = pose_detector.detect(frame, H, tvec)
+    if gesture_loc is None:
+        heartbeat_player.pause_sound()
+        continue
+    gesture_loc = gesture_loc / model["pixels_per_cm"]
+    heartbeat_player.play_sound()
 
     # Determine zone from point of interest
     zone_id = interact.push_gesture(gesture_loc)
