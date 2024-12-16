@@ -101,6 +101,16 @@ class AmbientSoundPlayer:
             self.player.pause()
 
 
+def draw_rect_in_image(image, sz, H):
+    img_corners = np.array([[0,0],[sz[1],0],[sz[1],sz[0]],[0,sz[0]]], dtype=np.float32)
+    img_corners = np.reshape(img_corners, [-1, 1, 2])
+    H_inv = np.linalg.inv(H)
+    pts = cv.perspectiveTransform(img_corners, H_inv)
+    for pt in pts:
+        image = cv.circle(image, (int(pt[0][0]), int(pt[0][1])), 3, (0, 255, 0), -1)
+    return image
+
+
 def select_cam_port():
     available_ports, working_ports, non_working_ports = list_ports()
     if len(working_ports) == 1:
@@ -237,6 +247,7 @@ while cap.isOpened():
     gesture_loc, gesture_status, img_scene_color = pose_detector.detect(frame, H, tvec)
     if gesture_loc is None:
         heartbeat_player.pause_sound()
+        img_scene_color = draw_rect_in_image(img_scene_color, interact.image_map_color.shape, H)
         continue
     gesture_loc = gesture_loc / model["pixels_per_cm"]
     heartbeat_player.play_sound()
@@ -246,6 +257,9 @@ while cap.isOpened():
 
     # If the zone id is valid, play the sound for the zone
     camio_player.convey(zone_id, gesture_status)
+
+    # Draw points in image
+    img_scene_color = draw_rect_in_image(img_scene_color, interact.image_map_color.shape, H)
 
 camio_player.play_goodbye()
 heartbeat_player.pause_sound()
