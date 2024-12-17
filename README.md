@@ -1,16 +1,18 @@
-Simple CamIO
+Simple CamIO 2D
 
-Requirements: To run Simple CamIO, one needs to set up several things. 
+Description: Simple CamIO 2D is a Python version of CamIO specialized to a flat, rectangular model such as a tactile map. This version relies on finger/hand tracking rather than the use of a stylus.
 
-- Firstly, we require a printed map with text features along the edges. An image of this map should be included, with its filename being specified in the element "template_image" of the model dictionary of the input json file.  
+Requirements: To run Simple CamIO 2D, one needs to set up several things. 
 
-- Secondly, we require a digital version of the map that represents zones with a unique index, as in models\UkraineMap\UkraineMap.png, and this filename should be specified in the element "filename" of the model dictionary of the input json file. The image dimensions should match that of the template image. 
+- Firstly, we require a printed map with text features along all four edges. An image of this map should be included, with its filename being specified in the element "template_image" of the model dictionary of the input json file.  
+
+- Secondly, we require a digital version of the map that represents hotspot zones with unique indices as in models\UkraineMap\UkraineMap.png, and this filename should be specified in the element "filename" of the model dictionary of the input json file. Each index is a specific (R,G,B) color value. The image dimensions should match that of the template image. 
 
 - Sound files, as named in the hotspots dictionary in the supplied json file, should be placed in the appropriate folder, as specified in the hotspots dictionary. The hotspots dictionary maps the zone index (from the zone map) to the sound file.
 
 - Python 3.9 installed with opencv, numpy, scipy, mediapipe, and pyglet libraries (most of which can be installed through Anaconda, except mediapipe and pyglet which need to be installed via pip). The required library versions are specified in the requirements.txt file.
 
-For best performance, we recommend the camera sit above the map to get a fronto-parallel view as much as possible. The camera should have an unobstructed view of the 4 sides of the map, and the hand should be held such that the camera can clearly view it.
+For best performance, we recommend the camera sit above the map to get a fronto-parallel view as much as possible. The camera should have an unobstructed view of the 4 sides of the map, and the hand should be held such that the camera can clearly view it. . The map should be close enough to the camera to take up most of the space in the camera image (so it is well resolved), but sufficient space (roughly 20 cm) between the map and the edges of the image should be available to ensure reliable finger/hand tracking even when the user is pointing to a feature near an edge of the map.
 
 To run, simply run the simple_camio.py script as "python simple_camio.py --input1 \<json file\>" where \<json file\> is the location of the json file containing the model parameters, such as models/UkraineMap/UkraineMap.json. 
 

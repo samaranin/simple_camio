@@ -2,6 +2,7 @@ import numpy as np
 import cv2 as cv
 import mediapipe as mp
 from scipy import stats
+from google.protobuf.json_format import MessageToDict
 
 
 class PoseDetectorMP:
@@ -15,14 +16,17 @@ class PoseDetectorMP:
 
     def detect(self, image, H, _):
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
-
+        handedness = list()
         results = self.hands.process(image)
         coors = np.zeros((4,3), dtype=float)
         # Draw the hand annotations on the image.
         image.flags.writeable = True
         image = cv.cvtColor(image, cv.COLOR_RGB2BGR)
+        index_pos = None
+        movement_status = None
         if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
+            for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                handedness.append(MessageToDict(results.multi_handedness[h])['classification'][0]['label'])
                 for k in [1, 2, 3, 4]:  # joints in thumb
                     coors[k - 1, 0], coors[k - 1, 1], coors[k - 1, 2] = hand_landmarks.landmark[k].x, \
                                                                         hand_landmarks.landmark[k].y, \
@@ -66,12 +70,22 @@ class PoseDetectorMP:
 
                 position = np.matmul(H, np.array([hand_landmarks.landmark[8].x*image.shape[1],
                                                   hand_landmarks.landmark[8].y*image.shape[0], 1]))
+                if index_pos is None:
+                    index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
+                    # index_pos = np.array([hand_landmarks.landmark[8].x, hand_landmarks.landmark[8].y, 0])
                 if (ratio_index > 0.7) and (ratio_middle < 0.95) and (ratio_ring < 0.95) and (ratio_little < 0.95):
-                    #print(hand_landmarks.landmark[8])
-                    return np.array([position[0]/position[2], position[1]/position[2], 0], dtype=float), "pointing", image
-                else:
-                    return np.array([position[0]/position[2], position[1]/position[2], 0], dtype=float), "moving", image
-        return None, None, image
+                    if movement_status != "pointing" or len(handedness) > 1 and handedness[1] == handedness[0]:
+                        index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
+                        # index_pos = np.array([hand_landmarks.landmark[8].x, hand_landmarks.landmark[8].y, 0])
+                        movement_status = "pointing"
+                    else:
+                        index_pos = np.append(index_pos,
+                                              np.array([position[0] / position[2], position[1] / position[2], 0],
+                                                       dtype=float))
+                        movement_status = "too_many"
+                elif movement_status != "pointing":
+                    movement_status = "moving"
+        return index_pos, movement_status, image
 
 
     def ratio(self, coors):  # ratio is 1 if points are collinear, lower otherwise (minimum is 0)
