@@ -16,6 +16,7 @@ For best performance, we recommend the camera sit above the map to get a fronto-
 
 To run, simply run the simple_camio.py script as "python simple_camio.py --input1 \<json file\>" where \<json file\> is the location of the json file containing the model parameters, such as models/UkraineMap/UkraineMap.json. 
 
+To reset the homography, that is, to update the map position in the image, press the 'h' key.
 __________________________________________________
 How to install Python libraries
 1. Download and install Python 3.9.13 from https://www.python.org.
