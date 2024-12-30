@@ -15,6 +15,9 @@ mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_styles = mp.solutions.drawing_styles
 
+# Define the styles for the landmarks and connections
+# These are used to draw the hands in the image
+
 landmarks = mp_hands.HandLandmark.__members__.values()
 
 active_landmark_style = mp_styles.get_default_hand_landmarks_style()
@@ -34,10 +37,10 @@ def ratio(coors: npt.NDArray[np.float32]) -> np.float32:
     This function calculates a value between 0 and 1 that represents how close the points are to be collinear.
     1 means that the points are collinear, 0 means that the points are as far as possible.
     """
-    d = np.linalg.norm(coors[0, :] - coors[3, :])
     a = np.linalg.norm(coors[0, :] - coors[1, :])
     b = np.linalg.norm(coors[1, :] - coors[2, :])
     c = np.linalg.norm(coors[2, :] - coors[3, :])
+    d = np.linalg.norm(coors[0, :] - coors[3, :])
 
     return d / (a + b + c)
 
@@ -47,7 +50,7 @@ class Hand:
     This class represents a hand detected in an image.
     """
 
-    POINTING_THRESHOLD = 0.08
+    POINTING_THRESHOLD = 0.10
 
     class Side(IntEnum):
         """
@@ -70,15 +73,8 @@ class Hand:
         self.landmarks = landmarks
         " The landmarks of the hand extracted by the MediaPipe library. "
 
-        self.pointing_ratio = self.__get_pointing_ratio()
-        " A floating point number between -1 and 1 that represents how much the hand is pointing. "
-
-    @property
-    def is_pointing(self) -> bool:
-        """
-        Whether the hand is pointing or not.
-        """
-        return self.pointing_ratio > self.POINTING_THRESHOLD
+        self.is_pointing = self.__compute_is_pointing()
+        " A boolean that indicates if the hand is pointing. "
 
     @property
     def landmark(self) -> List[Any]:
@@ -105,17 +101,16 @@ class Hand:
             connection_drawing_spec=connection_style,
         )
 
-    def __get_pointing_ratio(self) -> float:
+    def __compute_is_pointing(self) -> bool:
         """
-        Calculate the pointing ratio of a hand.
-        The pointing ratio is a floating point number between -1 and 1.
-        If the pointing ratio is positive, the hand is pointing.
+        Compute whether the hand is pointing or not.
         """
 
         if not self.is_index_visible:
             return 0.0
 
         coors = np.zeros((4, 3), dtype=float)
+        is_pointing = True
 
         for k in [5, 6, 7, 8]:  # joints in index finger
             coors[k - 5, 0], coors[k - 5, 1], coors[k - 5, 2] = (
@@ -125,6 +120,9 @@ class Hand:
             )
         ratio_index = ratio(coors)
 
+        a = coors[0, :]
+        ab = coors[3, :] - coors[0, :]
+
         for k in [9, 10, 11, 12]:  # joints in middle finger
             coors[k - 9, 0], coors[k - 9, 1], coors[k - 9, 2] = (
                 self.landmarks[k].x,
@@ -132,6 +130,11 @@ class Hand:
                 self.landmarks[k].z,
             )
         ratio_middle = ratio(coors)
+
+        for i in range(4):
+            ap = coors[i, :] - a
+            if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                is_pointing = False
 
         for k in [13, 14, 15, 16]:  # joints in ring finger
             coors[k - 13, 0], coors[k - 13, 1], coors[k - 13, 2] = (
@@ -141,6 +144,11 @@ class Hand:
             )
         ratio_ring = ratio(coors)
 
+        for i in range(4):
+            ap = coors[i, :] - a
+            if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                is_pointing = False
+
         for k in [17, 18, 19, 20]:  # joints in little finger
             coors[k - 17, 0], coors[k - 17, 1], coors[k - 17, 2] = (
                 self.landmarks[k].x,
@@ -149,10 +157,15 @@ class Hand:
             )
         ratio_little = ratio(coors)
 
+        for i in range(4):
+            ap = coors[i, :] - a
+            if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                is_pointing = False
+
         overall = ratio_index - ((ratio_middle + ratio_ring + ratio_little) / 3)
         # print("overall evidence for index pointing:", overall)
 
-        return float(overall)
+        return is_pointing or overall > Hand.POINTING_THRESHOLD
 
 
 @dataclass(frozen=True)
