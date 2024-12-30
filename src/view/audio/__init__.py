@@ -1,5 +1,5 @@
 from .audio_manager import AudioManager
-from .camio_tts import CamIOTTS
+from .mapio_tts import MapIOTTS
 from .stt import STT
 from .tts import TTS, Announcement, PauseAnnouncement
 
@@ -10,5 +10,5 @@ __all__ = [
     "Announcement",
     "Announcement",
     "PauseAnnouncement",
-    "CamIOTTS",
+    "MapIOTTS",
 ]

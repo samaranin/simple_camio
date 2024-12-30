@@ -1,5 +1,5 @@
 {
-    "welcome": "Welcome to CamIO!",
+    "welcome": "Welcome to MapIO!",
     "no_question_error": "No question recognized. Please try again.",
     "llm_error": "An error occurred in obtaining a response. Please try again.",
     "more_than_one_hand": "Please, no more than one hand per side",

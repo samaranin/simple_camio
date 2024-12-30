@@ -17,7 +17,7 @@ class Config:
         return cls.__instance
 
     def __init__(self) -> None:
-        self.name = "CamIO"
+        self.name = "MapIO"
 
         self.debug = False
         self.lang = Lang.EN.value

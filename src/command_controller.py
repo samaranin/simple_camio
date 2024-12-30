@@ -9,7 +9,7 @@ from src.llm import LLM
 from src.modules_repository import ModulesRepository
 from src.position import PositionHandler, PositionInfo
 from src.view import KeyboardManager, UserAction
-from src.view.audio import STT, Announcement, AudioManager, CamIOTTS
+from src.view.audio import STT, Announcement, AudioManager, MapIOTTS
 
 
 class VoiceCommands:
@@ -239,8 +239,8 @@ class HandlingThread(th.Thread):
         return None
 
     @property
-    def tts(self) -> CamIOTTS:
-        return self.repository[CamIOTTS]
+    def tts(self) -> MapIOTTS:
+        return self.repository[MapIOTTS]
 
     @property
     def stt(self) -> STT:

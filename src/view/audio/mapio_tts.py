@@ -10,7 +10,7 @@ from src.position import MovementDirection, PositionInfo
 from .tts import TTS, Announcement, TextAnnouncement
 
 
-class CamIOTTS(TTS):
+class MapIOTTS(TTS):
     ANNOUNCEMENT_INTERVAL = 0.25
     ERROR_INTERVAL = 3.5
 
@@ -145,7 +145,7 @@ class CamIOTTS(TTS):
     def wrong_direction(self) -> Optional[Announcement]:
         if (
             time.time() - self._timestamps[Announcement.Category.ERROR]
-            < CamIOTTS.ERROR_INTERVAL
+            < MapIOTTS.ERROR_INTERVAL
         ):
             return None
 
@@ -158,7 +158,7 @@ class CamIOTTS(TTS):
     def more_than_one_hand(self) -> Optional[Announcement]:
         if (
             time.time() - self._timestamps[Announcement.Category.ERROR]
-            < CamIOTTS.ERROR_INTERVAL
+            < MapIOTTS.ERROR_INTERVAL
         ):
             return None
 
@@ -178,7 +178,7 @@ class CamIOTTS(TTS):
     def position(self, info: PositionInfo) -> Optional[Announcement]:
         if (
             time.time() - self._timestamps[Announcement.Category.GRAPH]
-            < CamIOTTS.ANNOUNCEMENT_INTERVAL
+            < MapIOTTS.ANNOUNCEMENT_INTERVAL
         ):
             return
 
