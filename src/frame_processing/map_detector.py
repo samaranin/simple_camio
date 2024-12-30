@@ -11,8 +11,20 @@ from src.modules_repository import Module
 
 
 class MapDetector(Module):
+    """
+    Module used to detect the map in the camera feed and calculate the homography matrix
+    This class exposes only two method, `detect` and `fix_model`:
+    - `detect` takes an image as input and returns the homography matrix and the image with the corners drawn
+    - `fix_model` stops the detection process and returns the last homography matrix calculated
+    If the detection process is stopped, the same homography matrix will be returned for every call to `detect`.
+    This is useful when the map is detected we don't want to waste resources on further detections
+    """
+
     DETECTION_INTERVAL = 5  # seconds
-    RATIO_THRESH = 0.75
+    """ Minimum interval between two map detections """
+
+    RATIO_THRESHOLD = 0.75
+    """ Threshold used to filter the good matches """
 
     def __init__(self) -> None:
         super().__init__()
@@ -26,18 +38,34 @@ class MapDetector(Module):
         )
 
         self.last_detection = 0.0, np.zeros((3, 3), dtype=np.float32)
+        """ Tuple containing the time of the last detection and the homography matrix """
+
         self.__run_detection = True
+        """ Flag used to stop the detection process """
 
     @property
     def homography(self) -> npt.NDArray[np.float32]:
+        """
+        Return the homography matrix of the last detection.
+        """
         return self.last_detection[1]
 
     def fix_model(self) -> None:
+        """
+        Stop the detection process.
+        This will cause the `detect` method to always return the last homography matrix calculated.
+        """
         self.__run_detection = False
 
     def detect(
         self, img: npt.NDArray[np.uint8]
     ) -> Tuple[Optional[npt.NDArray[np.float32]], npt.NDArray[np.uint8]]:
+        """
+        Detect the map in the input image and return the homography matrix and the image with the corners drawn on it (if in debug mode).
+        If the detection process is stopped by calling `fix_model`, the homography matrix will be returned without further detections.
+        If this method is called before the `DETECTION_INTERVAL` has passed since the last detection, the homography matrix will be returned without further detections.
+        """
+
         if (
             not self.__run_detection
             or time.time() - self.last_detection[0] < self.DETECTION_INTERVAL
@@ -59,7 +87,7 @@ class MapDetector(Module):
 
         good_matches = list()
         for m, n in knn_matches:
-            if m.distance < MapDetector.RATIO_THRESH * n.distance:
+            if m.distance < MapDetector.RATIO_THRESHOLD * n.distance:
                 good_matches.append(m)
 
         if len(good_matches) < 4:
@@ -88,6 +116,10 @@ class MapDetector(Module):
     def __draw_corners(
         self, img: npt.NDArray[np.uint8], homography: npt.NDArray[np.float32]
     ) -> npt.NDArray[np.uint8]:
+        """
+        Draw the corners of the map detected on the input image.
+        This is used for debugging purposes to visualize the detection.
+        """
         inverted_homography = np.linalg.inv(homography)
 
         h, w = self.map_shape[:2]

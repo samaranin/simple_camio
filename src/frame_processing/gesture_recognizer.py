@@ -219,7 +219,7 @@ EXPLORING = GestureResult(GestureResult.Status.EXPLORING)
 
 class GestureRecognizer(Module):
     """
-    This class is responsible for detecting pointing gestures.
+    This module is responsible for detecting pointing gestures.
     It exposes only one method, `detect`, that receives an image and a homography matrix and returns a `GestureResult`.
     The homography matrix can be calculated using the `MapDetector` class.
     """
