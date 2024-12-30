@@ -33,8 +33,8 @@ Edit the `.env` file to set the correct values for the environment variables.
 The following environment variables must be set in the `.env` file:
 
 -   `OPENAI_API_KEY`: API key for the OpenAI LLM model, can be obtained [here](https://platform.openai.com/api-keys)
--   `GOOGLE_SPEECH_CLOUD_KEY_FILE`: path to the Google Cloud service account key file, follow this guide to create one.
--   `GOOGLE_ROUTES_API_KEY`: API key for the Google Routes API, follow this guide to create one.
+-   `GOOGLE_SPEECH_CLOUD_KEY_FILE`: path to the Google Cloud service account key file, follow the guide below to create one.
+-   `GOOGLE_ROUTES_API_KEY`: API key for the Google Routes API, follow the guide below to create one.
 
 ### Google Cloud project setup:
 
