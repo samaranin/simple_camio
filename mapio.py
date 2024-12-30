@@ -31,9 +31,13 @@ from src.view import (
 from src.view.audio import STT, Announcement, AudioManager, MapIOTTS
 
 repository = ModulesRepository()
+""" Repository for accessing all the modules in the application. """
 
 
 class MapIOController:
+    """
+    Main controller for the MapIO application.
+    """
 
     def __init__(self, model: Dict[str, Any]) -> None:
         self.description = model["context"].get("description", None)
@@ -70,6 +74,10 @@ class MapIOController:
         self.running = False
 
     def main_loop(self) -> None:
+        """
+        Main loop of the application.
+        """
+
         video_capture = VideoCapture.get_capture()
         if video_capture is None:
             print("No camera found.")
@@ -317,17 +325,21 @@ if __name__ == "__main__":
 
     mapio: Optional[MapIOController] = None
     try:
+        # Start the main controller and run the application
         mapio = MapIOController(model)
         mapio.main_loop()
 
     except KeyboardInterrupt:
+        # Keyboard interrupt stops the application
         pass
 
     except Exception:
+        # All other exceptions are caught and printed
         print(f"\nAn error occurred:\n")
         print(traceback.format_exc())
 
     if mapio is not None:
+        # Save the chat log to a file
         mapio.stop()
         mapio.save_chat(args.out)
         print(f"\nChat saved to {args.out}")
