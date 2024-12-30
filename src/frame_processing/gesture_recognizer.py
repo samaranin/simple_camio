@@ -52,9 +52,9 @@ class Hand:
         def __str__(self) -> str:
             return self.name.lower()
 
-    def __init__(self, side: Side, visible: bool, landmarks) -> None:
+    def __init__(self, side: Side, is_index_visible: bool, landmarks) -> None:
         self.side = side
-        self.visible = visible
+        self.is_index_visible = is_index_visible
         self.landmarks = landmarks
         self.pointing_ratio = self.__get_pointing_ratio()
 
@@ -84,7 +84,7 @@ class Hand:
         If the pointing ratio is positive, the hand is pointing.
         """
 
-        if not self.visible:
+        if not self.is_index_visible:
             return 0.0
 
         coors = np.zeros((4, 3), dtype=float)
@@ -174,13 +174,13 @@ class GestureRecognizer(Module):
     def detect(
         self, img: npt.NDArray[np.uint8], H: npt.NDArray[np.float32]
     ) -> Tuple[GestureResult, npt.NDArray[np.uint8]]:
-        def detection(hands: List[Hand]) -> Tuple[GestureResult, npt.NDArray[np.uint8]]:
+        def detection(hands: List[Hand]) -> GestureResult:
             if len(hands) == 0:
-                return NOT_FOUND, img
+                return NOT_FOUND
 
-            hands = list(filter(lambda h: h.visible, hands))
+            hands = list(filter(lambda h: h.is_index_visible, hands))
             if len(hands) == 0:
-                return EXPLORING, img
+                return EXPLORING
 
             hands_per_side = {
                 side: [h for h in hands if h.side == side] for side in Hand.Side
@@ -190,7 +190,7 @@ class GestureRecognizer(Module):
                 len(hands_per_side[Hand.Side.LEFT]) > 1
                 or len(hands_per_side[Hand.Side.RIGHT]) > 1
             ):
-                return MORE_THAN_ONE_HAND, img
+                return MORE_THAN_ONE_HAND
 
             for hand in hands:
                 self.buffers[hand.side].add(self.get_index_position(hand, img, H))
@@ -198,7 +198,7 @@ class GestureRecognizer(Module):
             pointing_hands = list(filter(lambda h: h.is_pointing, hands))
 
             if len(pointing_hands) == 0:
-                return EXPLORING, img
+                return EXPLORING
 
             side_pointing = self.last_side_pointing
             if len(pointing_hands) == 1:
@@ -211,7 +211,7 @@ class GestureRecognizer(Module):
                 side_pointing = Hand.Side.LEFT
 
             if side_pointing is None:
-                return EXPLORING, img
+                return EXPLORING
 
             result = GestureResult(
                 GestureResult.Status.POINTING,
@@ -219,10 +219,10 @@ class GestureRecognizer(Module):
                 side_pointing,
             )
 
-            return result, img
+            return result
 
         hands = self.__get_hands(img, H)
-        gesture, img = detection(hands)
+        gesture = detection(hands)
 
         self.last_side_pointing = gesture.side
 
@@ -288,7 +288,7 @@ class GestureRecognizer(Module):
         return [
             Hand(
                 side=Hand.Side(results.multi_handedness[i].classification[0].index),
-                visible=self.is_index_visible(hand, img, H),
+                is_index_visible=self.is_index_visible(hand, img, H),
                 landmarks=hand.landmark,
             )
             for i, hand in enumerate(results.multi_hand_landmarks)

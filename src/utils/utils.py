@@ -5,10 +5,16 @@ from typing import Any, Dict, Mapping, Optional
 
 
 def str_format(v: Any) -> str:
+    """
+    Convert a value to a string representation and replace underscores with spaces.
+    """
     return str(v).replace("_", " ")
 
 
 def str_dict(d: Mapping[Any, Any], indent: int = 0) -> str:
+    """
+    Convert a dictionary to a string representation with proper indentation.
+    """
     res = ""
 
     for key, value in d.items():
@@ -32,6 +38,10 @@ def str_dict(d: Mapping[Any, Any], indent: int = 0) -> str:
 
 
 def load_map_parameters(filename: str) -> Optional[Dict[str, Any]]:
+    """
+    Load map parameters from a JSON file.
+    If the file does not exist or is not a valid JSON file, return None.
+    """
     if not os.path.exists(filename) or not os.path.isfile(filename):
         return None
 
@@ -45,6 +55,11 @@ def load_map_parameters(filename: str) -> Optional[Dict[str, Any]]:
 
 
 class StrEnum(str, Enum):
+    """
+    Enum class that inherits from str and Enum.
+    This allows for the enum values to be used as strings.
+    """
+
     def __str__(self) -> str:
         return str(self.value)
 
@@ -53,6 +68,10 @@ class StrEnum(str, Enum):
 
 
 class CardinalDirection(StrEnum):
+    """
+    Enum for cardinal directions.
+    """
+
     SOUTH_WEST = "south-west"
     WEST = "west"
     NORTH_WEST = "north-west"

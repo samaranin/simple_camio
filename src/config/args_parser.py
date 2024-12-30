@@ -42,3 +42,6 @@ mapio_parser.add_argument(
 )
 
 get_args = mapio_parser.parse_args
+"""
+Get the arguments from the command line. These should be passed to the Config class to load the configuration.
+"""
