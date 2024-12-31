@@ -13,6 +13,7 @@ from src.modules_repository import Module
 class MapDetector(Module):
     DETECTION_INTERVAL = 5  # seconds
     RATIO_THRESH = 0.75
+    INLIERS_THRESH = 24
 
     def __init__(self) -> None:
         super().__init__()
@@ -25,7 +26,7 @@ class MapDetector(Module):
             self.detector.detectAndCompute(img_template, mask=None)
         )
 
-        self.last_detection = 0.0, np.zeros((3, 3), dtype=np.float32)
+        self.last_detection = 0.0, None
         self.__run_detection = True
 
     @property
@@ -74,11 +75,16 @@ class MapDetector(Module):
             scene[i, 0] = keypoints[good_matches[i].trainIdx].pt[0]
             scene[i, 1] = keypoints[good_matches[i].trainIdx].pt[1]
 
-        H, _ = cv2.findHomography(
+        H, inliers = cv2.findHomography(
             scene, obj, cv2.RANSAC, ransacReprojThreshold=8.0, confidence=0.995
         )
 
-        self.last_detection = time.time(), H
+        total = np.sum([int(i) for i in inliers])
+        # print(f"Total number of inliners: {total}")
+        if total > self.INLIERS_THRESH:
+            self.last_detection = time.time(), H
+        else:
+            H = self.last_detection[1]
 
         if H is not None and config.debug:
             img = self.__draw_corners(img, H)
