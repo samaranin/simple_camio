@@ -14,22 +14,30 @@ from typing import Any, Callable, Dict, List, Optional
 
 from src.command_controller import CommandController
 from src.config import config, get_args
-from src.frame_processing import (GestureRecognizer, GestureResult, Hand,
-                                  MapDetector)
+from src.frame_processing import GestureRecognizer, GestureResult, Hand, MapDetector
 from src.graph import Graph, RouteAction, WayPoint
 from src.llm import LLM
 from src.modules_repository import ModulesRepository
 from src.navigation import NavigationAction, NavigationController
 from src.position import PositionHandler
 from src.utils import Coords, load_map_parameters
-from src.view import (KeyboardManager, UserAction, VideoCapture, ViewManager,
-                      ignore_action_end)
-from src.view.audio import STT, Announcement, AudioManager, CamIOTTS
+from src.view import (
+    KeyboardManager,
+    UserAction,
+    VideoCapture,
+    ViewManager,
+    ignore_action_end,
+)
+from src.view.audio import STT, Announcement, AudioManager, MapIOTTS
 
 repository = ModulesRepository()
+""" Repository for accessing all the modules in the application. """
 
 
-class CamIOController:
+class MapIOController:
+    """
+    Main controller for the MapIO application.
+    """
 
     def __init__(self, model: Dict[str, Any]) -> None:
         self.description = model["context"].get("description", None)
@@ -49,7 +57,7 @@ class CamIOController:
 
         # View
         self.view = ViewManager(self.graph.pois)
-        self.tts = CamIOTTS(f"res/strings_{config.lang}.json", rate=config.tts_rate)
+        self.tts = MapIOTTS(f"res/strings_{config.lang}.json", rate=config.tts_rate)
         self.stt = STT()
         self.audio_manager = AudioManager("res/sounds.json")
 
@@ -66,6 +74,10 @@ class CamIOController:
         self.running = False
 
     def main_loop(self) -> None:
+        """
+        Main loop of the application.
+        """
+
         video_capture = VideoCapture.get_capture()
         if video_capture is None:
             print("No camera found.")
@@ -311,19 +323,23 @@ if __name__ == "__main__":
     config.load_model(model)
     print(f"\nLoaded map: {model.get('name', 'Unknown')}\n")
 
-    camio: Optional[CamIOController] = None
+    mapio: Optional[MapIOController] = None
     try:
-        camio = CamIOController(model)
-        camio.main_loop()
+        # Start the main controller and run the application
+        mapio = MapIOController(model)
+        mapio.main_loop()
 
     except KeyboardInterrupt:
+        # Keyboard interrupt stops the application
         pass
 
     except Exception:
+        # All other exceptions are caught and printed
         print(f"\nAn error occurred:\n")
         print(traceback.format_exc())
 
-    if camio is not None:
-        camio.stop()
-        camio.save_chat(args.out)
+    if mapio is not None:
+        # Save the chat log to a file
+        mapio.stop()
+        mapio.save_chat(args.out)
         print(f"\nChat saved to {args.out}")

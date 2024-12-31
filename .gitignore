@@ -24,3 +24,10 @@ out
 .DS_STORE
 .vscode
 .venv
+
+# python venv
+share
+Scripts
+Lib
+Include
+pyvenv.cfg

@@ -1,8 +1,8 @@
-# CamIO with LLM integration
+# MapIO
 
 ## Environment setup:
 
-This version of CamIO runs with Python 3.8. Once installed, the required packages can be set up with the following commands.</br>
+This version of MapIO runs with Python 3.8. Once installed, the required packages can be set up with the following commands.</br>
 If you are on an Apple Silicon machine, please follow the [Apple Silicon-specific instructions](#for-apple-silicon-machines) before running these commands.
 
 ```bash
@@ -10,8 +10,8 @@ If you are on an Apple Silicon machine, please follow the [Apple Silicon-specifi
 brew install portaudio
 
 # Create and activate a Python virtual environment
-python3.8 -m venv camio-llm    # or python3, depending on your setup
-cd camio-llm
+python3.8 -m venv mapio-llm    # or python3, depending on your setup
+cd mapio-llm
 source bin/activate
 
 # Clone the repository
@@ -33,8 +33,8 @@ Edit the `.env` file to set the correct values for the environment variables.
 The following environment variables must be set in the `.env` file:
 
 -   `OPENAI_API_KEY`: API key for the OpenAI LLM model, can be obtained [here](https://platform.openai.com/api-keys)
--   `GOOGLE_SPEECH_CLOUD_KEY_FILE`: path to the Google Cloud service account key file, follow this guide to create one.
--   `GOOGLE_ROUTES_API_KEY`: API key for the Google Routes API, follow this guide to create one.
+-   `GOOGLE_SPEECH_CLOUD_KEY_FILE`: path to the Google Cloud service account key file, follow the guide below to create one.
+-   `GOOGLE_ROUTES_API_KEY`: API key for the Google Routes API, follow the guide below to create one.
 
 ### Google Cloud project setup:
 
@@ -114,7 +114,7 @@ alias ipython3.8="../bin/python"
 To run the code, simply run the following command:
 
 ```bash
-python3.8 camio.py --model <path_to_model>
+python3.8 mapio.py --model <path_to_model>
 ```
 
 Replace python3.8 with ipython3.8 if you're on an Apple Silicon Machine.
@@ -124,7 +124,7 @@ Root privileges may be required to run the code.
 For a list of all available command line arguments, run:
 
 ```bash
-python3.8 camio.py --help
+python3.8 mapio.py --help
 ```
 
 Enabling debug mode (`--debug`) is highly recommended to visualize the user's finger movements and the activated points of interest.
@@ -142,4 +142,4 @@ Enabling debug mode (`--debug`) is highly recommended to visualize the user's fi
 ## Model creation:
 
 A software utility for creating map models is available at:
-[CamIO Model Creation Utility](https://github.com/Matteo-3033/CamIO-Model-creation-utility)
+[MapIO Model Creation Utility](https://github.com/Matteo-3033/CamIO-Model-creation-utility)

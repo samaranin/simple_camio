@@ -15,6 +15,9 @@ mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_styles = mp.solutions.drawing_styles
 
+# Define the styles for the landmarks and connections
+# These are used to draw the hands in the image
+
 landmarks = mp_hands.HandLandmark.__members__.values()
 
 active_landmark_style = mp_styles.get_default_hand_landmarks_style()
@@ -34,39 +37,60 @@ def ratio(coors: npt.NDArray[np.float32]) -> np.float32:
     This function calculates a value between 0 and 1 that represents how close the points are to be collinear.
     1 means that the points are collinear, 0 means that the points are as far as possible.
     """
-    d = np.linalg.norm(coors[0, :] - coors[3, :])
     a = np.linalg.norm(coors[0, :] - coors[1, :])
     b = np.linalg.norm(coors[1, :] - coors[2, :])
     c = np.linalg.norm(coors[2, :] - coors[3, :])
+    d = np.linalg.norm(coors[0, :] - coors[3, :])
 
     return d / (a + b + c)
 
 
 class Hand:
-    POINTING_THRESHOLD = 0.08
+    """
+    This class represents a hand detected in an image.
+    """
+
+    POINTING_THRESHOLD = 0.10
 
     class Side(IntEnum):
+        """
+        Possible sides of a hand.
+        """
+
         RIGHT = 0
         LEFT = 1
 
         def __str__(self) -> str:
             return self.name.lower()
 
-    def __init__(self, side: Side, visible: bool, landmarks) -> None:
+    def __init__(self, side: Side, is_index_visible: bool, landmarks) -> None:
         self.side = side
-        self.visible = visible
-        self.landmarks = landmarks
-        self.pointing_ratio = self.__get_pointing_ratio()
+        " The side of the hand. "
 
-    @property
-    def is_pointing(self) -> bool:
-        return self.pointing_ratio > self.POINTING_THRESHOLD
+        self.is_index_visible = is_index_visible
+        " A boolean that indicates if the index finger is visible. "
+
+        self.landmarks = landmarks
+        " The landmarks of the hand extracted by the MediaPipe library. "
+
+        self.is_pointing = self.__compute_is_pointing()
+        " A boolean that indicates if the hand is pointing. "
 
     @property
     def landmark(self) -> List[Any]:
+        """
+        The landmarks of the hand extracted by the MediaPipe library.
+        """
         return self.landmarks
 
     def draw(self, img: npt.NDArray[np.uint8], active: bool = False) -> None:
+        """
+        Draw the hand in the image.
+
+        :param img: The image where the hand will be drawn. It should be the same image that was used to detect the hand.
+        :param active: A boolean that indicates if the hand should be drawn as active or not.
+        """
+
         mp_drawing.draw_landmarks(
             img,
             self,
@@ -77,17 +101,16 @@ class Hand:
             connection_drawing_spec=connection_style,
         )
 
-    def __get_pointing_ratio(self) -> float:
+    def __compute_is_pointing(self) -> bool:
         """
-        This function calculates the pointing ratio of a hand.
-        The pointing ratio is a floating point number between -1 and 1.
-        If the pointing ratio is positive, the hand is pointing.
+        Compute whether the hand is pointing or not.
         """
 
-        if not self.visible:
+        if not self.is_index_visible:
             return 0.0
 
         coors = np.zeros((4, 3), dtype=float)
+        is_pointing = True
 
         for k in [5, 6, 7, 8]:  # joints in index finger
             coors[k - 5, 0], coors[k - 5, 1], coors[k - 5, 2] = (
@@ -97,6 +120,9 @@ class Hand:
             )
         ratio_index = ratio(coors)
 
+        a = coors[0, :]
+        ab = coors[3, :] - coors[0, :]
+
         for k in [9, 10, 11, 12]:  # joints in middle finger
             coors[k - 9, 0], coors[k - 9, 1], coors[k - 9, 2] = (
                 self.landmarks[k].x,
@@ -104,6 +130,11 @@ class Hand:
                 self.landmarks[k].z,
             )
         ratio_middle = ratio(coors)
+
+        for i in range(4):
+            ap = coors[i, :] - a
+            if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                is_pointing = False
 
         for k in [13, 14, 15, 16]:  # joints in ring finger
             coors[k - 13, 0], coors[k - 13, 1], coors[k - 13, 2] = (
@@ -113,6 +144,11 @@ class Hand:
             )
         ratio_ring = ratio(coors)
 
+        for i in range(4):
+            ap = coors[i, :] - a
+            if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                is_pointing = False
+
         for k in [17, 18, 19, 20]:  # joints in little finger
             coors[k - 17, 0], coors[k - 17, 1], coors[k - 17, 2] = (
                 self.landmarks[k].x,
@@ -121,31 +157,73 @@ class Hand:
             )
         ratio_little = ratio(coors)
 
+        for i in range(4):
+            ap = coors[i, :] - a
+            if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                is_pointing = False
+
         overall = ratio_index - ((ratio_middle + ratio_ring + ratio_little) / 3)
         # print("overall evidence for index pointing:", overall)
 
-        return float(overall)
+        return is_pointing or overall > Hand.POINTING_THRESHOLD
 
 
 @dataclass(frozen=True)
 class GestureResult:
+    """
+    This class represents the result of a gesture detection.
+    """
+
     class Status(Enum):
+        """
+        This class represents the possible statuses of a gesture detection.
+        """
+
         MORE_THAN_ONE_HAND = -1
+        """This status represents the case where more than one hand of the same side is found in the image."""
+
         NOT_FOUND = 0
+        """This status represents the case where no hand is found in the image."""
+
         POINTING = 1
+        """This status represents the case where a hand is pointing."""
+
         EXPLORING = 2
+        """This status represents the case where no hand is pointing."""
 
     status: Status
+    """The status of the gesture detection."""
+
     position: Optional[Coords] = None
+    """
+    The position of the index finger in the image.
+    This field is not None only when the status is `POINTING`.
+    """
+
     side: Optional[Hand.Side] = None
+    """
+    The side of the hand that is pointing.
+    This field is not None only when the status is `POINTING`.
+    """
 
 
 NOT_FOUND = GestureResult(GestureResult.Status.NOT_FOUND)
+"""This constant represents the case where no hand is found in the image."""
+
 MORE_THAN_ONE_HAND = GestureResult(GestureResult.Status.MORE_THAN_ONE_HAND)
+"""This constant represents the case where more than one hand of the same side is found in the image."""
+
 EXPLORING = GestureResult(GestureResult.Status.EXPLORING)
+"""This constant represents the case where no hand is pointing."""
 
 
 class GestureRecognizer(Module):
+    """
+    This module is responsible for detecting pointing gestures.
+    It exposes only one method, `detect`, that receives an image and a homography matrix and returns a `GestureResult`.
+    The homography matrix can be calculated using the `MapDetector` class.
+    """
+
     MOVEMENT_THRESHOLD = 0.25  # inch
 
     def __init__(self) -> None:
@@ -174,13 +252,20 @@ class GestureRecognizer(Module):
     def detect(
         self, img: npt.NDArray[np.uint8], H: npt.NDArray[np.float32]
     ) -> Tuple[GestureResult, npt.NDArray[np.uint8]]:
-        def detection(hands: List[Hand]) -> Tuple[GestureResult, npt.NDArray[np.uint8]]:
-            if len(hands) == 0:
-                return NOT_FOUND, img
+        """
+        Detect pointing gestures in an image and return the result of the detection and the image with the hands drawn.
 
-            hands = list(filter(lambda h: h.visible, hands))
+        :param img: The image where the pointing gestures will be detected.
+        :param H: The homography matrix used to detect the hands.
+        """
+
+        def detection(hands: List[Hand]) -> GestureResult:
             if len(hands) == 0:
-                return EXPLORING, img
+                return NOT_FOUND
+
+            hands = list(filter(lambda h: h.is_index_visible, hands))
+            if len(hands) == 0:
+                return EXPLORING
 
             hands_per_side = {
                 side: [h for h in hands if h.side == side] for side in Hand.Side
@@ -190,7 +275,7 @@ class GestureRecognizer(Module):
                 len(hands_per_side[Hand.Side.LEFT]) > 1
                 or len(hands_per_side[Hand.Side.RIGHT]) > 1
             ):
-                return MORE_THAN_ONE_HAND, img
+                return MORE_THAN_ONE_HAND
 
             for hand in hands:
                 self.buffers[hand.side].add(self.get_index_position(hand, img, H))
@@ -198,7 +283,7 @@ class GestureRecognizer(Module):
             pointing_hands = list(filter(lambda h: h.is_pointing, hands))
 
             if len(pointing_hands) == 0:
-                return EXPLORING, img
+                return EXPLORING
 
             side_pointing = self.last_side_pointing
             if len(pointing_hands) == 1:
@@ -211,7 +296,7 @@ class GestureRecognizer(Module):
                 side_pointing = Hand.Side.LEFT
 
             if side_pointing is None:
-                return EXPLORING, img
+                return EXPLORING
 
             result = GestureResult(
                 GestureResult.Status.POINTING,
@@ -219,10 +304,10 @@ class GestureRecognizer(Module):
                 side_pointing,
             )
 
-            return result, img
+            return result
 
         hands = self.__get_hands(img, H)
-        gesture, img = detection(hands)
+        gesture = detection(hands)
 
         self.last_side_pointing = gesture.side
 
@@ -232,6 +317,13 @@ class GestureRecognizer(Module):
         return self.gesture_buffer.aggregate(gesture), img
 
     def is_moving(self, side: Hand.Side) -> bool:
+        """
+        Return whether the index finger of a hand is moving or not for a given side.
+        This method uses a buffer to store the last positions of the index finger. The buffer is updated every time the `detect` method is called.
+
+        :param side: The side of the hand.
+        """
+
         first = self.buffers[side].first()
         last = self.buffers[side].last()
 
@@ -243,6 +335,13 @@ class GestureRecognizer(Module):
     def get_index_position(
         self, hand, img: npt.NDArray[np.uint8], H: npt.NDArray[np.float32]
     ) -> Coords:
+        """
+        Return the position of the index finger in the image for a given hand.
+
+        :param hand: The landmarks of the hand extracted by the MediaPipe library.
+        :param img: The image where the hand was detected.
+        """
+
         position = np.array(
             [
                 [
@@ -257,9 +356,16 @@ class GestureRecognizer(Module):
         return Coords(position[0], position[1])
 
     def is_index_visible(
-        self, hand_landmarks, img: npt.NDArray[np.uint8], H: npt.NDArray[np.float32]
+        self, hand, img: npt.NDArray[np.uint8], H: npt.NDArray[np.float32]
     ) -> bool:
-        index_position = self.get_index_position(hand_landmarks, img, H)
+        """
+        Return whether the index finger is visible in the image for a given hand.
+
+        :param hand: The landmarks of the hand extracted by the MediaPipe library.
+        :param img: The image where the hand was detected.
+        :param H: The homography matrix used to detect the hand
+        """
+        index_position = self.get_index_position(hand, img, H)
 
         return (
             0 <= index_position[0] < self.image_size[0]
@@ -269,6 +375,13 @@ class GestureRecognizer(Module):
     def __get_hands(
         self, img: npt.NDArray[np.uint8], H: npt.NDArray[np.float32]
     ) -> List[Hand]:
+        """
+        Apply the hand detection model to an image and return a list of `Hand` objects.
+
+        :param img: The image where the hands will be detected.
+        :param H: The homography matrix used to detect the hands.
+        """
+
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         img.flags.writeable = False
@@ -282,13 +395,21 @@ class GestureRecognizer(Module):
     def __process_results(
         self, img: npt.NDArray[np.uint8], H: npt.NDArray[np.float32], results
     ) -> List[Hand]:
+        """
+        Process the results of the hand detection model and return a list of `Hand` objects.
+
+        :param img: The image where the hands were detected.
+        :param H: The homography matrix used to detect the hands.
+        :param results: The results of the hand detection model.
+        """
+
         if not results.multi_hand_landmarks:
             return list()
 
         return [
             Hand(
                 side=Hand.Side(results.multi_handedness[i].classification[0].index),
-                visible=self.is_index_visible(hand, img, H),
+                is_index_visible=self.is_index_visible(hand, img, H),
                 landmarks=hand.landmark,
             )
             for i, hand in enumerate(results.multi_hand_landmarks)
@@ -296,11 +417,27 @@ class GestureRecognizer(Module):
 
 
 class GestureBuffer:
+    """
+    This class is responsible for aggregating gesture results.
+    It uses a buffer to store the last results and return the aggregated result.
+    The buffer is updated every time the `aggregate` method is called.
+    The buffer has a maximum size of 5 and a maximum life of 1 second.
+    """
+
+    MAX_SIZE = 5
+    MAX_LIFE = 1
+
     def __init__(self) -> None:
-        self.buffer = Buffer[GestureResult.Status](max_size=5, max_life=1)
+        self.buffer = Buffer[GestureResult.Status](
+            GestureBuffer.MAX_SIZE, GestureBuffer.MAX_LIFE
+        )
         self.last_position: Optional[Coords] = None
 
     def aggregate(self, gesture: GestureResult) -> GestureResult:
+        """
+        Add a gesture result to the buffer and return the aggregated result.
+        """
+
         self.buffer.add(gesture.status)
 
         res = NOT_FOUND
