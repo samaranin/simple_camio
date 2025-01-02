@@ -42,7 +42,6 @@ class MapDetector(Module):
         self.last_detection = 0.0, None
         """ Tuple containing the time of the last detection and the homography matrix """
 
-        self.last_detection = 0.0, None
         self.__run_detection = True
         """ Flag used to stop the detection process """
 
@@ -114,6 +113,7 @@ class MapDetector(Module):
         if total > self.INLIERS_THRESH:
             self.last_detection = time.time(), H
         else:
+            print(f"Warning: not enough inliers found for confident estimate of homography ({total}/{self.INLIERS_THRESH})")
             H = self.last_detection[1]
 
         if H is not None and config.debug:
