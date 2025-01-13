@@ -136,7 +136,7 @@ class SIFTModelDetectorMP:
         )
         self.requires_homography = True
         self.H = None
-        self.MIN_INLIER_COUNT = 40
+        self.MIN_INLIER_COUNT = 15
 
     def detect(self, frame):
         # If we have already computed the coordinate transform then simply return it
