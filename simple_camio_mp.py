@@ -12,7 +12,6 @@ class PoseDetectorMP:
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         self.image_map_color = cv.imread(model['filename'], cv.IMREAD_COLOR)
-        self.pixels_per_cm = model['pixels_per_cm']
 
     def detect(self, image, H, _):
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
@@ -109,7 +108,7 @@ class InteractionPolicyMP:
     # the impact is clearly minor, but conceptually I am not convinced that this is the right behavior.
     # Sergio (2): I have a concern about this function, I will discuss it in an email.
     def push_gesture(self, position):
-        zone_color = self.get_zone(position, self.image_map_color, self.model['pixels_per_cm'])
+        zone_color = self.get_zone(position, self.image_map_color)
         self.zone_filter[self.zone_filter_cnt] = self.get_dict_idx_from_color(zone_color)
         self.zone_filter_cnt = (self.zone_filter_cnt + 1) % self.ZONE_FILTER_SIZE
         zone = stats.mode(self.zone_filter).mode
