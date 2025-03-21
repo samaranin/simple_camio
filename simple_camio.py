@@ -249,7 +249,6 @@ while cap.isOpened():
         heartbeat_player.pause_sound()
         img_scene_color = draw_rect_in_image(img_scene_color, interact.image_map_color.shape, H)
         continue
-    gesture_loc = gesture_loc / model["pixels_per_cm"]
     heartbeat_player.play_sound()
 
     # Determine zone from point of interest

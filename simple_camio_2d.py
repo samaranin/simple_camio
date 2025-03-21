@@ -23,7 +23,7 @@ class InteractionPolicy2D:
     # the impact is clearly minor, but conceptually I am not convinced that this is the right behavior.
     # Sergio (2): I have a concern about this function, I will discuss it in an email.
     def push_gesture(self, position):
-        zone_color = self.get_zone(position, self.image_map_color, self.model['pixels_per_cm'])
+        zone_color = self.get_zone(position, self.image_map_color)
         self.zone_filter[self.zone_filter_cnt] = self.get_dict_idx_from_color(zone_color)
         self.zone_filter_cnt = (self.zone_filter_cnt + 1) % self.ZONE_FILTER_SIZE
         zone = stats.mode(self.zone_filter).mode
@@ -35,9 +35,9 @@ class InteractionPolicy2D:
             return -1
 
     # Retrieves the zone of the point of interest on the map
-    def get_zone(self, point_of_interest, img_map, pixels_per_cm):
-        x = int(point_of_interest[0] * pixels_per_cm)
-        y = int(point_of_interest[1] * pixels_per_cm)
+    def get_zone(self, point_of_interest, img_map):
+        x = int(point_of_interest[0])
+        y = int(point_of_interest[1])
         #map_copy = img_map.copy()
         if 0 <= x < img_map.shape[1] and 0 <= y < img_map.shape[0]:
             # cv.line(map_copy, (x-1, y), (x+1, y), (255, 0, 0), 2)
