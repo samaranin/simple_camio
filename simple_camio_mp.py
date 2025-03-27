@@ -168,24 +168,24 @@ class SIFTModelDetectorMP:
             self.scene, obj, cv.RANSAC, ransacReprojThreshold=8.0, confidence=0.995
         )
         total = sum([int(i) for i in self.mask_out])
-        obj_in = np.empty((total,2),dtype=np.float32)
-        scene_in = np.empty((total,2),dtype=np.float32)
-        index = 0
-        for i in range(len(self.mask_out)):
-            if self.mask_out[i]:
-                obj_in[index,:] = obj[i,:]
-                scene_in[index,:] = self.scene[i,:]
-                index += 1
-        scene_out = np.squeeze(cv.perspectiveTransform(scene_in.reshape(-1,1,2), H))
-        biggest_distance = 0
-        sum_distance = 0
-        for i in range(len(scene_out)):
-            dist = cv.norm(obj_in[i,:],scene_out[i,:],cv.NORM_L2)
-            sum_distance += dist
-            if dist > biggest_distance:
-                biggest_distance = dist
-        ave_dist = sum_distance/total
-        print(f'Inlier count: {total}. Biggest distance: {biggest_distance}. Average distance: {ave_dist}.')
+        # obj_in = np.empty((total,2),dtype=np.float32)
+        # scene_in = np.empty((total,2),dtype=np.float32)
+        # index = 0
+        # for i in range(len(self.mask_out)):
+        #     if self.mask_out[i]:
+        #         obj_in[index,:] = obj[i,:]
+        #         scene_in[index,:] = self.scene[i,:]
+        #         index += 1
+        # scene_out = np.squeeze(cv.perspectiveTransform(scene_in.reshape(-1,1,2), H))
+        # biggest_distance = 0
+        # sum_distance = 0
+        # for i in range(len(scene_out)):
+        #     dist = cv.norm(obj_in[i,:],scene_out[i,:],cv.NORM_L2)
+        #     sum_distance += dist
+        #     if dist > biggest_distance:
+        #         biggest_distance = dist
+        # ave_dist = sum_distance/total
+        print(f'Inlier count: {total}.')# Biggest distance: {biggest_distance}. Average distance: {ave_dist}.')
         if total > self.MIN_INLIER_COUNT:
             self.H = H
             self.requires_homography = False
