@@ -28,7 +28,7 @@ class Buffer(Generic[T]):
         self.buffer.append(value)
         self.buffer_timestamps.append(time.time())
 
-    def __items(self) -> Deque[T]:
+    def _items(self) -> Deque[T]:
         while (
             len(self.buffer) > 0
             and time.time() - self.buffer_timestamps[0] > self.max_life
@@ -49,7 +49,7 @@ class Buffer(Generic[T]):
         """
         Return the most common element in the buffer.
         """
-        items = self.__items()
+        items = self._items()
 
         if len(items) == 0:
             return None
@@ -59,7 +59,7 @@ class Buffer(Generic[T]):
         """
         Return the first element in the buffer.
         """
-        items = self.__items()
+        items = self._items()
 
         if len(items) == 0:
             return None
@@ -69,14 +69,14 @@ class Buffer(Generic[T]):
         """
         Return the last element in the buffer.
         """
-        items = self.__items()
+        items = self._items()
 
         if len(items) == 0:
             return None
         return items[-1]
 
     def __str__(self) -> str:
-        return str(self.__items())
+        return str(self._items())
 
     def __repr__(self) -> str:
         return str(self)
@@ -104,7 +104,7 @@ class ArithmeticBuffer(Buffer[U]):
         """
         Return the average of the elements in the buffer.
         """
-        items = self.__items()
+        items = self._items()
 
         if len(items) == 0:
             return None
