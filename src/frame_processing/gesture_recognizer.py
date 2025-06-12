@@ -120,7 +120,7 @@ class Hand:
             )
         ratio_index = ratio(coors)
 
-        a = coors[0, :]
+        a = coors[0, :].copy()
         ab = coors[3, :] - coors[0, :]
 
         for k in [9, 10, 11, 12]:  # joints in middle finger
