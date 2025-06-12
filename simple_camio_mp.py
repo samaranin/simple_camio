@@ -26,6 +26,7 @@ class PoseDetectorMP:
         if results.multi_hand_landmarks:
             for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness.append(MessageToDict(results.multi_handedness[h])['classification'][0]['label'])
+                is_pointing = True
                 for k in [1, 2, 3, 4]:  # joints in thumb
                     coors[k - 1, 0], coors[k - 1, 1], coors[k - 1, 2] = hand_landmarks.landmark[k].x, \
                                                                         hand_landmarks.landmark[k].y, \
@@ -37,6 +38,8 @@ class PoseDetectorMP:
                                                                         hand_landmarks.landmark[k].y, \
                                                                         hand_landmarks.landmark[k].z
                 ratio_index = self.ratio(coors)
+                a = coors[0, :].copy()
+                ab = coors[3, :] - coors[0, :]
 
                 for k in [9, 10, 11, 12]:  # joints in middle finger
                     coors[k - 9, 0], coors[k - 9, 1], coors[k - 9, 2] = hand_landmarks.landmark[k].x, \
@@ -44,11 +47,21 @@ class PoseDetectorMP:
                                                                         hand_landmarks.landmark[k].z
                 ratio_middle = self.ratio(coors)
 
+                for i in range(4):
+                    ap = coors[i, :] - a
+                    if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                        is_pointing = False
+
                 for k in [13, 14, 15, 16]:  # joints in ring finger
                     coors[k - 13, 0], coors[k - 13, 1], coors[k - 13, 2] = hand_landmarks.landmark[k].x, \
                                                                            hand_landmarks.landmark[k].y, \
                                                                            hand_landmarks.landmark[k].z
                 ratio_ring = self.ratio(coors)
+
+                for i in range(4):
+                    ap = coors[i, :] - a
+                    if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                        is_pointing = False
 
                 for k in [17, 18, 19, 20]:  # joints in little finger
                     coors[k - 17, 0], coors[k - 17, 1], coors[k - 17, 2] = hand_landmarks.landmark[k].x, \
@@ -56,8 +69,14 @@ class PoseDetectorMP:
                                                                            hand_landmarks.landmark[k].z
                 ratio_little = self.ratio(coors)
 
+                for i in range(4):
+                    ap = coors[i, :] - a
+                    if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
+                        is_pointing = False
+
                 # print(ratio_thumb, ratio_index, ratio_middle, ratio_ring, ratio_little)
-                # overall = ratio_index / ((ratio_middle + ratio_ring + ratio_little) / 3)
+                overall = ratio_index - ((ratio_middle + ratio_ring + ratio_little) / 3)
+                is_pointing = is_pointing or overall > 0.1
                 # print('overall evidence for index pointing:', overall)
 
                 self.mp_drawing.draw_landmarks(
@@ -72,7 +91,7 @@ class PoseDetectorMP:
                 if index_pos is None:
                     index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
                     # index_pos = np.array([hand_landmarks.landmark[8].x, hand_landmarks.landmark[8].y, 0])
-                if (ratio_index > 0.7) and (ratio_middle < 0.95) and (ratio_ring < 0.95) and (ratio_little < 0.95):
+                if (is_pointing or (ratio_index > 0.7) and (ratio_middle < 0.95) and (ratio_ring < 0.95) and (ratio_little < 0.95)):
                     if movement_status != "pointing" or len(handedness) > 1 and handedness[1] == handedness[0]:
                         index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
                         # index_pos = np.array([hand_landmarks.landmark[8].x, hand_landmarks.landmark[8].y, 0])
