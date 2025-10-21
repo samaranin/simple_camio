@@ -35,7 +35,6 @@ class PoseDetectorMP:
         movement_status = None
 
         if results.multi_hand_landmarks:
-            print(f"[MediaPipe] Detected {len(results.multi_hand_landmarks)} hand(s)")  # Debug output
             for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 # handedness
                 # use original normalized coordinates (they are scale-invariant) for math/drawing
@@ -110,7 +109,6 @@ class PoseDetectorMP:
                     if movement_status != "pointing":
                         index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
                         movement_status = "pointing"
-                        print(f"[Gesture] POINTING detected at ({index_pos[0]:.1f}, {index_pos[1]:.1f})")
                     else:
                         index_pos = np.append(index_pos,
                                               np.array([position[0] / position[2], position[1] / position[2], 0],
@@ -118,11 +116,25 @@ class PoseDetectorMP:
                         movement_status = "too_many"
                 elif movement_status != "pointing":
                     movement_status = "moving"
-                    print(f"[Gesture] MOVING at ({index_pos[0]:.1f}, {index_pos[1]:.1f})")
-        else:
-            print("[MediaPipe] No hands detected")  # Debug output
 
-        return index_pos, movement_status, img_out
+        # Normalize index_pos: always return either None or a 1D numpy array of length 3 [x,y,z].
+        if index_pos is None:
+            normalized = None
+        else:
+            arr = np.asarray(index_pos)
+            if arr.size == 0:
+                normalized = None
+            elif arr.size >= 3:
+                # If arr is flat concatenation of multiple [x,y,z] triplets, take the last triplet (most recent)
+                if arr.size % 3 == 0 and arr.size > 3:
+                    normalized = arr.reshape(-1, 3)[-1].astype(float)
+                else:
+                    # take first 3 elements as fallback
+                    normalized = arr.flatten()[:3].astype(float)
+            else:
+                normalized = None
+
+        return normalized, movement_status, img_out
 
 
     def ratio(self, coors):  # ratio is 1 if points are collinear, lower otherwise (minimum is 0)

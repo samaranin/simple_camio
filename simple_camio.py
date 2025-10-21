@@ -197,6 +197,20 @@ class PoseWorker(threading.Thread):
                 gesture_loc, gesture_status, annotated = self.pose_detector.detect(frame, H, None, processing_scale=self.processing_scale)
             except Exception as e:
                 gesture_loc, gesture_status, annotated = None, None, frame
+
+            # Defensive normalization: ensure gesture_loc is either None or a 1D ndarray with 3 elements
+            if gesture_loc is not None:
+                arr = np.asarray(gesture_loc)
+                if arr.size == 0:
+                    gesture_loc = None
+                elif arr.size >= 3:
+                    if arr.size % 3 == 0 and arr.size > 3:
+                        gesture_loc = arr.reshape(-1, 3)[-1].astype(float)
+                    else:
+                        gesture_loc = arr.flatten()[:3].astype(float)
+                else:
+                    gesture_loc = None
+
             with self.lock:
                 self.latest = (gesture_loc, gesture_status, annotated)
 
@@ -272,6 +286,10 @@ sift_worker.start()
 timer = time.time() - 1
 print("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
 
+# Add small helper near main loop to check gesture validity
+def _gesture_valid(g):
+    return (g is not None) and (hasattr(g, "__len__")) and (np.asarray(g).size >= 3)
+
 # Main loop - FIXED: all processing before display
 while cap.isOpened():
     ret, frame = cap.read()
@@ -323,11 +341,11 @@ while cap.isOpened():
         # Have homography - ALWAYS draw rectangle when homography exists
         display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
 
-        if gesture_loc is None:
-            # Have homography but no hand detected
+        if not _gesture_valid(gesture_loc):
+            # Have homography but no valid gesture detected
             heartbeat_player.pause_sound()
         else:
-            # Have both homography and hand gesture
+            # Have both homography and hand gesture - this branch is now reachable when detector returns valid position
             heartbeat_player.play_sound()
 
             # Determine zone and play audio
