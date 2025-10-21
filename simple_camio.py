@@ -9,7 +9,8 @@ import pyglet.media
 from collections import deque
 from simple_camio_2d import InteractionPolicy2D, CamIOPlayer2D
 from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP
-
+import threading
+import queue
 
 
 class MovementFilter:
@@ -167,6 +168,61 @@ def load_map_parameters(filename):
     return map_params['model']
 
 
+# Insert worker threads for async processing
+class PoseWorker(threading.Thread):
+    def __init__(self, pose_detector, in_queue, lock, processing_scale=0.5):
+        super().__init__(daemon=True)
+        self.pose_detector = pose_detector
+        self.in_queue = in_queue
+        self.lock = lock
+        self.processing_scale = processing_scale
+        self.latest = (None, None, None)  # gesture_loc, status, annotated_image
+        self.running = True
+
+    def run(self):
+        while self.running:
+            try:
+                frame, H = self.in_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            # run detector (downscaled inside)
+            try:
+                gesture_loc, gesture_status, annotated = self.pose_detector.detect(frame, H, None, processing_scale=self.processing_scale)
+            except Exception as e:
+                gesture_loc, gesture_status, annotated = None, None, frame
+            with self.lock:
+                self.latest = (gesture_loc, gesture_status, annotated)
+
+    def stop(self):
+        self.running = False
+
+
+class SIFTWorker(threading.Thread):
+    def __init__(self, sift_detector, in_queue, lock):
+        super().__init__(daemon=True)
+        self.sift_detector = sift_detector
+        self.in_queue = in_queue
+        self.lock = lock
+        self.running = True
+
+    def run(self):
+        while self.running:
+            try:
+                frame = self.in_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            # Only run detection when required; detector maintains requires_homography internally
+            try:
+                retval, H, _ = self.sift_detector.detect(frame)
+            except Exception:
+                retval, H = False, None
+            # SIFTModelDetectorMP stores self.H and requires_homography, so main can read it
+            # no need to publish here; main uses model_detector.H directly
+
+    def stop(self):
+        self.running = False
+
+
 parser = argparse.ArgumentParser(description='Code for CamIO.')
 parser.add_argument('--input1', help='Path to parameter json file.', default='models/UkraineMap/UkraineMap.json')
 args = parser.parse_args()
@@ -196,71 +252,112 @@ cap = cv.VideoCapture(cam_port)
 cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)  # set camera image height
 cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)  # set camera image width
 cap.set(cv.CAP_PROP_FOCUS, 0)
+
+# Create queues and workers
+pose_queue = queue.Queue(maxsize=1)
+sift_queue = queue.Queue(maxsize=1)
+lock = threading.Lock()
+pose_worker = PoseWorker(pose_detector, pose_queue, lock, processing_scale=0.5)
+sift_worker = SIFTWorker(model_detector, sift_queue, lock)
+pose_worker.start()
+sift_worker.start()
+
 loop_has_run = False
 timer = time.time() - 1
 print("Press \"h\" key to update map position in image.")
-# Main loop
+# Main loop (non-blocking; uses latest results from workers)
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         print("No camera image returned.")
         break
+
+    # Push frame for SIFT (grayscale) only if homography still required
+    if model_detector.requires_homography:
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        # ensure single-frame queue (drop if full)
+        try:
+            sift_queue.put_nowait(gray)
+        except queue.Full:
+            try:
+                _ = sift_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                sift_queue.put_nowait(gray)
+            except queue.Full:
+                pass
+
+    # Push frame for pose worker (use full color BGR)
+    # provide current H or fallback to last known H (identity if None)
+    H_current = model_detector.H if model_detector.H is not None else np.eye(3)
+    try:
+        pose_queue.put_nowait((frame.copy(), H_current))
+    except queue.Full:
+        try:
+            _ = pose_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            pose_queue.put_nowait((frame.copy(), H_current))
+        except queue.Full:
+            pass
+
+    # Retrieve latest pose worker output
+    with lock:
+        gesture_loc, gesture_status, annotated = pose_worker.latest
+
+    # Display annotated image if available, otherwise raw frame
+    display_img = annotated if (annotated is not None) else frame
+
+    # Show image and handle keys
     if loop_has_run:
-        cv.imshow('image reprojection', img_scene_color)
+        cv.imshow('image reprojection', display_img)
         waitkey = cv.waitKey(1)
         if waitkey == 27 or waitkey == ord('q'):
             print('Escape.')
-            cap.release()
-            cv.destroyAllWindows()
             break
         if waitkey == ord('h'):
             model_detector.requires_homography = True
         if waitkey == ord('b'):
             camio_player.enable_blips = not camio_player.enable_blips
-            if camio_player.enable_blips:
-                print("Blips have been enabled.")
-            else:
-                print("Blips have been disabled.")
+            print("Blips have been " + ("enabled." if camio_player.enable_blips else "disabled."))
+
     prev_time = timer
     timer = time.time()
     elapsed_time = timer - prev_time
-    #print("current fps: " + str(1/elapsed_time))
+    # if elapsed_time > 0:
+    #     print("current fps: " + str(1/elapsed_time))
     pyglet.clock.tick()
     pyglet.app.platform_event_loop.dispatch_posted_events()
-    img_scene_color = frame.copy()
     loop_has_run = True
 
-    # load images grayscale
-    img_scene_gray = cv.cvtColor(img_scene_color, cv.COLOR_BGR2GRAY)
-    # Detect aruco markers for map in image
-    retval, H, tvec = model_detector.detect(img_scene_gray)
-
-    # If no  markers found, continue to next iteration
-    if not retval:
+    # If no homography yet we skip gestures/interaction
+    if model_detector.H is None:
         heartbeat_player.pause_sound()
         crickets_player.play_sound()
         continue
 
-    camio_player.play_description()
-    crickets_player.pause_sound()
-
-    gesture_loc, gesture_status, img_scene_color = pose_detector.detect(frame, H, tvec)
+    # Use latest gesture results (non-blocking)
     if gesture_loc is None:
         heartbeat_player.pause_sound()
-        img_scene_color = draw_rect_in_image(img_scene_color, interact.image_map_color.shape, H)
+        display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
         continue
     heartbeat_player.play_sound()
 
-    # Determine zone from point of interest
+    # Determine zone and play audio
     zone_id = interact.push_gesture(gesture_loc)
-
-    # If the zone id is valid, play the sound for the zone
     camio_player.convey(zone_id, gesture_status)
 
-    # Draw points in image
-    img_scene_color = draw_rect_in_image(img_scene_color, interact.image_map_color.shape, H)
+    # Draw the map rectangle for visualization
+    display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
 
+# shutdown
+pose_worker.stop()
+sift_worker.stop()
 camio_player.play_goodbye()
 heartbeat_player.pause_sound()
 crickets_player.pause_sound()
 time.sleep(1)
+cap.release()
+cv.destroyAllWindows()
