@@ -35,6 +35,7 @@ class PoseDetectorMP:
         movement_status = None
 
         if results.multi_hand_landmarks:
+            print(f"[MediaPipe] Detected {len(results.multi_hand_landmarks)} hand(s)")  # Debug output
             for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 # handedness
                 # use original normalized coordinates (they are scale-invariant) for math/drawing
@@ -109,6 +110,7 @@ class PoseDetectorMP:
                     if movement_status != "pointing":
                         index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
                         movement_status = "pointing"
+                        print(f"[Gesture] POINTING detected at ({index_pos[0]:.1f}, {index_pos[1]:.1f})")
                     else:
                         index_pos = np.append(index_pos,
                                               np.array([position[0] / position[2], position[1] / position[2], 0],
@@ -116,6 +118,9 @@ class PoseDetectorMP:
                         movement_status = "too_many"
                 elif movement_status != "pointing":
                     movement_status = "moving"
+                    print(f"[Gesture] MOVING at ({index_pos[0]:.1f}, {index_pos[1]:.1f})")
+        else:
+            print("[MediaPipe] No hands detected")  # Debug output
 
         return index_pos, movement_status, img_out
 
@@ -164,8 +169,6 @@ class SIFTModelDetectorMP:
 
         # Extract SIFT features from template
         keypoints_sift, descriptors_sift = self.sift_detector.detectAndCompute(img_object, mask=None)
-
-        # Convert tuple to list for manipulation
         keypoints_sift = list(keypoints_sift)
 
         # Extract ORB features as backup
@@ -176,37 +179,111 @@ class SIFTModelDetectorMP:
         if corners is not None:
             corner_kps = [cv.KeyPoint(x=float(c[0][0]), y=float(c[0][1]), size=20) for c in corners]
             keypoints_sift.extend(corner_kps)
-            # Recompute SIFT descriptors with added corners
             keypoints_sift, descriptors_sift = self.sift_detector.compute(img_object, keypoints_sift)
 
-        # Store as instance variables
         self.keypoints_sift = keypoints_sift
         self.descriptors_sift = descriptors_sift
 
         self.requires_homography = True
         self.H = None
-        self.MIN_INLIER_COUNT = 10  # Lowered from 15 for better recognition
+        self.MIN_INLIER_COUNT = 10
+
+        # Add tracking quality monitoring
+        self.frames_since_last_detection = 0
+        self.REDETECT_INTERVAL = 150  # Force validation every 150 frames
+        self.last_inlier_count = 0
+        self.tracking_quality_history = []
+        self.MIN_TRACKING_QUALITY = 8  # Minimum inliers to maintain tracking
+
         print(f"Template features: SIFT={len(self.keypoints_sift)}, ORB={len(self.keypoints_orb)}")
 
-    def detect(self, frame):
+    def detect(self, frame, force_redetect=False):
+        """Detect with automatic re-detection when tracking degrades"""
+        # Manual re-detection trigger
+        if force_redetect:
+            print("Manual re-detection triggered")
+            self.requires_homography = True
+            self.H = None
+            self.tracking_quality_history.clear()
+
+        # Automatic triggers
+        if not self.requires_homography:
+            self.frames_since_last_detection += 1
+
+            # Trigger 1: Periodic validation
+            if self.frames_since_last_detection >= self.REDETECT_INTERVAL:
+                print(f"Periodic validation after {self.frames_since_last_detection} frames")
+                self._validate_tracking(frame)
+
+            # Trigger 2: Quality degradation
+            if len(self.tracking_quality_history) >= 3:
+                avg_quality = np.mean(self.tracking_quality_history[-3:])
+                if avg_quality < self.MIN_TRACKING_QUALITY:
+                    print(f"Tracking degraded (avg: {avg_quality:.1f}), re-detecting")
+                    self.requires_homography = True
+                    self.H = None
+                    self.tracking_quality_history.clear()
+
         if not self.requires_homography:
             return True, self.H, None
 
-        # Try SIFT matching first (more accurate)
+        # Try SIFT matching first
         success, H = self._match_sift(frame)
         if success:
+            self.frames_since_last_detection = 0
             return True, H, None
 
-        # Fallback to ORB if SIFT fails (faster, works with less texture)
+        # Fallback to ORB
         success, H = self._match_orb(frame)
         if success:
+            self.frames_since_last_detection = 0
             return True, H, None
 
-        # Return last known good H if available
+        # Return last known H if available
         if self.H is not None:
             return True, self.H, None
         else:
             return False, None, None
+
+    def _validate_tracking(self, frame):
+        """Validate current homography quality"""
+        keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(frame, None)
+        if descriptors_scene is None or len(keypoints_scene) < 4:
+            self.requires_homography = True
+            self.H = None
+            return
+
+        try:
+            FLANN_INDEX_KDTREE = 1
+            index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=8)
+            search_params = dict(checks=100)
+            matcher = cv.FlannBasedMatcher(index_params, search_params)
+            knn_matches = matcher.knnMatch(self.descriptors_sift, descriptors_scene, k=2)
+
+            good_matches = []
+            for match_pair in knn_matches:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < 0.8 * n.distance:
+                        good_matches.append(m)
+
+            match_count = len(good_matches)
+            self.tracking_quality_history.append(match_count)
+            if len(self.tracking_quality_history) > 10:
+                self.tracking_quality_history.pop(0)
+
+            print(f"Validation: {match_count} matches")
+
+            if match_count < self.MIN_TRACKING_QUALITY:
+                print("Validation failed: triggering re-detection")
+                self.requires_homography = True
+                self.H = None
+            else:
+                self.frames_since_last_detection = 0
+        except Exception as e:
+            print(f"Validation error: {e}")
+            self.requires_homography = True
+            self.H = None
 
     def _match_sift(self, frame):
         """SIFT-based matching with improved parameters"""
@@ -290,8 +367,21 @@ class SIFTModelDetectorMP:
 
         if total >= self.MIN_INLIER_COUNT:
             self.H = H
+            self.last_inlier_count = total
             self.requires_homography = False
+            self.tracking_quality_history.append(total)
+            if len(self.tracking_quality_history) > 10:
+                self.tracking_quality_history.pop(0)
             print(f"Homography locked using {method_name}")
             return True, H
 
         return False, None
+
+    def get_tracking_status(self):
+        """Return tracking status for display"""
+        if self.requires_homography:
+            return "SEARCHING FOR MAP"
+        else:
+            avg_quality = np.mean(self.tracking_quality_history) if self.tracking_quality_history else self.last_inlier_count
+            return f"TRACKING (Q:{avg_quality:.0f} Age:{self.frames_since_last_detection})"
+

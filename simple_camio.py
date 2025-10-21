@@ -107,8 +107,15 @@ def draw_rect_in_image(image, sz, H):
     img_corners = np.reshape(img_corners, [-1, 1, 2])
     H_inv = np.linalg.inv(H)
     pts = cv.perspectiveTransform(img_corners, H_inv)
+
+    # Draw actual rectangle with lines instead of dots
+    pts_int = np.int32(pts)
+    cv.polylines(image, [pts_int], isClosed=True, color=(0, 255, 0), thickness=3)
+
+    # Optionally draw corner dots for emphasis
     for pt in pts:
-        image = cv.circle(image, (int(pt[0][0]), int(pt[0][1])), 3, (0, 255, 0), -1)
+        cv.circle(image, (int(pt[0][0]), int(pt[0][1])), 5, (0, 255, 0), -1)
+
     return image
 
 
@@ -204,6 +211,7 @@ class SIFTWorker(threading.Thread):
         self.in_queue = in_queue
         self.lock = lock
         self.running = True
+        self.force_redetect = False
 
     def run(self):
         while self.running:
@@ -211,13 +219,16 @@ class SIFTWorker(threading.Thread):
                 frame = self.in_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            # Only run detection when required; detector maintains requires_homography internally
             try:
-                retval, H, _ = self.sift_detector.detect(frame)
-            except Exception:
+                retval, H, _ = self.sift_detector.detect(frame, force_redetect=self.force_redetect)
+                self.force_redetect = False
+            except Exception as e:
+                print(f"SIFT error: {e}")
                 retval, H = False, None
-            # SIFTModelDetectorMP stores self.H and requires_homography, so main can read it
-            # no need to publish here; main uses model_detector.H directly
+
+    def trigger_redetect(self):
+        """Manually trigger re-detection"""
+        self.force_redetect = True
 
     def stop(self):
         self.running = False
@@ -227,12 +238,9 @@ parser = argparse.ArgumentParser(description='Code for CamIO.')
 parser.add_argument('--input1', help='Path to parameter json file.', default='models/UkraineMap/UkraineMap.json')
 args = parser.parse_args()
 
-# Load map and camera parameters
 model = load_map_parameters(args.input1)
 
-# ========================================
 cam_port = select_cam_port()
-# ========================================
 
 # Initialize objects
 if model["modelType"] == "sift_2d_mediapipe":
@@ -246,11 +254,10 @@ if model["modelType"] == "sift_2d_mediapipe":
     crickets_player = AmbientSoundPlayer(model['crickets'])
     heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
 
-
 heartbeat_player.set_volume(.05)
 cap = cv.VideoCapture(cam_port)
-cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)  # set camera image height
-cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)  # set camera image width
+cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)
+cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)
 cap.set(cv.CAP_PROP_FOCUS, 0)
 
 # Create queues and workers
@@ -262,20 +269,19 @@ sift_worker = SIFTWorker(model_detector, sift_queue, lock)
 pose_worker.start()
 sift_worker.start()
 
-loop_has_run = False
 timer = time.time() - 1
-print("Press \"h\" key to update map position in image.")
-# Main loop (non-blocking; uses latest results from workers)
+print("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
+
+# Main loop - FIXED: all processing before display
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         print("No camera image returned.")
         break
 
-    # Push frame for SIFT (grayscale) only if homography still required
+    # Push frame for SIFT if needed
     if model_detector.requires_homography:
         gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        # ensure single-frame queue (drop if full)
         try:
             sift_queue.put_nowait(gray)
         except queue.Full:
@@ -288,8 +294,7 @@ while cap.isOpened():
             except queue.Full:
                 pass
 
-    # Push frame for pose worker (use full color BGR)
-    # provide current H or fallback to last known H (identity if None)
+    # Push frame for pose worker
     H_current = model_detector.H if model_detector.H is not None else np.eye(3)
     try:
         pose_queue.put_nowait((frame.copy(), H_current))
@@ -307,50 +312,55 @@ while cap.isOpened():
     with lock:
         gesture_loc, gesture_status, annotated = pose_worker.latest
 
-    # Display annotated image if available, otherwise raw frame
     display_img = annotated if (annotated is not None) else frame
 
-    # Show image and handle keys
-    if loop_has_run:
-        cv.imshow('image reprojection', display_img)
-        waitkey = cv.waitKey(1)
-        if waitkey == 27 or waitkey == ord('q'):
-            print('Escape.')
-            break
-        if waitkey == ord('h'):
-            model_detector.requires_homography = True
-        if waitkey == ord('b'):
-            camio_player.enable_blips = not camio_player.enable_blips
-            print("Blips have been " + ("enabled." if camio_player.enable_blips else "disabled."))
+    # PROCESS GESTURES AND INTERACTION
+    if model_detector.H is None:
+        # No homography yet
+        heartbeat_player.pause_sound()
+        crickets_player.play_sound()
+    else:
+        # Have homography - ALWAYS draw rectangle when homography exists
+        display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
 
+        if gesture_loc is None:
+            # Have homography but no hand detected
+            heartbeat_player.pause_sound()
+        else:
+            # Have both homography and hand gesture
+            heartbeat_player.play_sound()
+
+            # Determine zone and play audio
+            zone_id = interact.push_gesture(gesture_loc)
+            camio_player.convey(zone_id, gesture_status)
+
+    # Add status overlay
+    status_text = model_detector.get_tracking_status()
+    cv.putText(display_img, status_text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    # Add FPS
     prev_time = timer
     timer = time.time()
     elapsed_time = timer - prev_time
-    # if elapsed_time > 0:
-    #     print("current fps: " + str(1/elapsed_time))
+    if elapsed_time > 0:
+        fps_text = f"FPS: {1/elapsed_time:.1f}"
+        cv.putText(display_img, fps_text, (10, 60), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    # NOW DISPLAY (after all processing is done)
+    cv.imshow('image reprojection', display_img)
+    waitkey = cv.waitKey(1)
+    if waitkey == 27 or waitkey == ord('q'):
+        print('Exiting...')
+        break
+    if waitkey == ord('h'):
+        print("Manual re-detection triggered")
+        sift_worker.trigger_redetect()
+    if waitkey == ord('b'):
+        camio_player.enable_blips = not camio_player.enable_blips
+        print("Blips " + ("enabled" if camio_player.enable_blips else "disabled"))
+
     pyglet.clock.tick()
     pyglet.app.platform_event_loop.dispatch_posted_events()
-    loop_has_run = True
-
-    # If no homography yet we skip gestures/interaction
-    if model_detector.H is None:
-        heartbeat_player.pause_sound()
-        crickets_player.play_sound()
-        continue
-
-    # Use latest gesture results (non-blocking)
-    if gesture_loc is None:
-        heartbeat_player.pause_sound()
-        display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
-        continue
-    heartbeat_player.play_sound()
-
-    # Determine zone and play audio
-    zone_id = interact.push_gesture(gesture_loc)
-    camio_player.convey(zone_id, gesture_status)
-
-    # Draw the map rectangle for visualization
-    display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
 
 # shutdown
 pose_worker.stop()
