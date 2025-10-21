@@ -175,6 +175,9 @@ class SIFTModelDetectorMP:
         self.model = model
         img_object = cv.imread(model["template_image"], cv.IMREAD_GRAYSCALE)
 
+        # store template image for quick validation
+        self.img_object = img_object
+
         # Use more features and multiple detectors for robustness
         self.sift_detector = cv.SIFT_create(nfeatures=2000, contrastThreshold=0.03, edgeThreshold=15)
         self.orb_detector = cv.ORB_create(nfeatures=2000, scaleFactor=1.2, nlevels=12)
@@ -196,6 +199,9 @@ class SIFTModelDetectorMP:
         self.keypoints_sift = keypoints_sift
         self.descriptors_sift = descriptors_sift
 
+        # store template shape so we can compute object corners
+        self.template_shape = img_object.shape[:2]  # (h, w)
+
         self.requires_homography = True
         self.H = None
         self.MIN_INLIER_COUNT = 10
@@ -206,6 +212,10 @@ class SIFTModelDetectorMP:
         self.last_inlier_count = 0
         self.tracking_quality_history = []
         self.MIN_TRACKING_QUALITY = 8  # Minimum inliers to maintain tracking
+
+        # New: store whether H was updated and the projected rectangle pts in camera coords
+        self.homography_updated = False
+        self.last_rect_pts = None  # will hold Nx1x2 array same as cv.perspectiveTransform output
 
         print(f"Template features: SIFT={len(self.keypoints_sift)}, ORB={len(self.keypoints_orb)}")
 
@@ -378,16 +388,100 @@ class SIFTModelDetectorMP:
         print(f'{method_name} inlier count: {total}')
 
         if total >= self.MIN_INLIER_COUNT:
+            # If we accept the homography, store it and compute the rectangle projected into camera frame
             self.H = H
             self.last_inlier_count = total
             self.requires_homography = False
             self.tracking_quality_history.append(total)
             if len(self.tracking_quality_history) > 10:
                 self.tracking_quality_history.pop(0)
+
+            # Compute corners of the template in object coords and project to camera frame
+            h_t, w_t = self.template_shape  # template height, width
+            obj_corners = np.array([[0, 0], [w_t, 0], [w_t, h_t], [0, h_t]], dtype=np.float32).reshape(-1, 1, 2)
+            try:
+                H_inv = np.linalg.inv(self.H)
+                pts = cv.perspectiveTransform(obj_corners, H_inv)  # camera-frame points
+                self.last_rect_pts = pts  # store for drawing
+            except Exception as e:
+                print(f"Could not compute projected rectangle: {e}")
+                self.last_rect_pts = None
+
+            # flag update so main loop can highlight newly rebuilt rectangle
+            self.homography_updated = True
+
             print(f"Homography locked using {method_name}")
             return True, H
 
         return False, None
+
+    def quick_validate_position(self, scene_gray, min_matches=6, margin=30):
+        """
+        Quick local validation of the stored last_rect_pts against scene_gray.
+        Returns True if position appears valid (>= min_matches), False otherwise.
+        If validation fails, mark requires_homography=True and clear last_rect_pts.
+        """
+        if self.last_rect_pts is None or self.H is None:
+            return False
+
+        # compute bounding box from last_rect_pts (format Nx1x2)
+        pts = self.last_rect_pts.reshape(-1, 2)
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+        x_min = int(max(0, np.floor(xs.min()) - margin))
+        y_min = int(max(0, np.floor(ys.min()) - margin))
+        x_max = int(min(scene_gray.shape[1] - 1, np.ceil(xs.max()) + margin))
+        y_max = int(min(scene_gray.shape[0] - 1, np.ceil(ys.max()) + margin))
+
+        if x_max - x_min < 32 or y_max - y_min < 32:
+            # ROI too small to validate reliably
+            return False
+
+        roi = scene_gray[y_min:y_max, x_min:x_max]
+        if roi.size == 0:
+            return False
+
+        # detect SIFT in ROI
+        kps_scene, desc_scene = self.sift_detector.detectAndCompute(roi, None)
+        if desc_scene is None or len(kps_scene) < 4:
+            # not enough features, consider position invalid
+            self.requires_homography = True
+            self.last_rect_pts = None
+            print("quick_validate_position: not enough keypoints in ROI -> triggering re-detect")
+            return False
+
+        # match descriptors (template -> scene ROI)
+        try:
+            FLANN_INDEX_KDTREE = 1
+            index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=6)
+            search_params = dict(checks=50)
+            matcher = cv.FlannBasedMatcher(index_params, search_params)
+            knn_matches = matcher.knnMatch(self.descriptors_sift, desc_scene, k=2)
+        except Exception as e:
+            print(f"quick_validate_position: matcher failed: {e}")
+            return False
+
+        # ratio test
+        RATIO_THRESH = 0.8
+        good_matches = []
+        for pair in knn_matches:
+            if len(pair) == 2:
+                m, n = pair
+                if m.distance < RATIO_THRESH * n.distance:
+                    good_matches.append(m)
+
+        match_count = len(good_matches)
+        print(f"quick_validate_position: found {match_count} matches in ROI (threshold {min_matches})")
+
+        if match_count < min_matches:
+            # mark homography as stale
+            self.requires_homography = True
+            self.last_rect_pts = None
+            print("quick_validate_position: insufficient matches -> triggering re-detect")
+            return False
+
+        # validation passed: keep existing H and last_rect_pts
+        return True
 
     def get_tracking_status(self):
         """Return tracking status for display"""

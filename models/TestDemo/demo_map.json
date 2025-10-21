@@ -4,7 +4,7 @@
       "template_image":"models/TestDemo/base.png",
       "filename": "models/TestDemo/map.png",
       "blipsound":"MP3/quick_blip.wav",
-      "map_description":"models/TestDemo/Audio/Drahomanova.mp3",
+      "map_description":"models/TestDemo/Audio/Rivne Description.mp3",
       "welcome_message":"MP3/welcome.mp3",
       "goodbye_message":"MP3/goodbye.mp3",
       "heartbeat": "MP3/white_noise.mp3",
