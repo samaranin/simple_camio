@@ -353,11 +353,14 @@ def _gesture_valid(g):
 
 # Add a flash counter so rectangle highlight shows for a few frames after homography rebuild
 rect_flash_remaining = 0
-RECT_FLASH_FRAMES = 15  # number of frames highlight persists after re-detection
+RECT_FLASH_FRAMES = 10  # number of frames highlight persists after re-detection
 
-# validation cadence
-VALIDATE_EVERY = 15  # validate stored rect every N frames (tweakable)
-validate_counter = 0  # local counter used by main loop
+# validation cadence (time-based)
+VALIDATE_INTERVAL_SECONDS = 2.0  # run quick validation every N seconds
+_last_validation_time = 0.0
+
+# Remove validate_counter (was unreliable)
+# validate_counter = 0  # removed
 
 # Main loop - FIXED: all processing before display
 while cap.isOpened():
@@ -366,7 +369,7 @@ while cap.isOpened():
         print("No camera image returned.")
         break
 
-    validate_counter += 1  # increment per-frame
+    now_time = time.time()
 
     # We will need a grayscale copy sometimes (SIFT queue or quick validation)
     gray_for_validation = None
@@ -419,20 +422,30 @@ while cap.isOpened():
         heartbeat_player.pause_sound()
         crickets_player.play_sound()
     else:
-        # Quick validation: call every VALIDATE_EVERY frames using local counter
-        if (validate_counter % VALIDATE_EVERY) == 0:
-            validate_counter = 0  # reset counter
+        # Ensure age counter increments even if detect() isn't called every frame
+        try:
+            model_detector.frames_since_last_detection += 1
+        except Exception:
+            model_detector.frames_since_last_detection = 1
+
+        # Time-based quick validation (more reliable than previous counter)
+        if now_time - _last_validation_time >= VALIDATE_INTERVAL_SECONDS:
+            _last_validation_time = now_time
             # produce gray if not already produced
             if gray_for_validation is None:
                 gray_for_validation = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-            valid = model_detector.quick_validate_position(gray_for_validation, min_matches=6, margin=40)
+            # Use position_threshold of 30-50 pixels to detect movement
+            valid = model_detector.quick_validate_position(gray_for_validation, min_matches=6, position_threshold=40)
             if not valid:
-                # ensure detector is asked to re-detect immediately
+                # mark homography stale and prepare for re-detection
                 model_detector.requires_homography = True
                 model_detector.last_rect_pts = None
+                model_detector.homography_updated = False
+
+                # request worker to re-detect immediately
                 sift_worker.trigger_redetect()
 
-                # enqueue the gray frame a few times to increase chances worker consumes it quickly
+                # enqueue current gray frame several times for quick consumption
                 for _ in range(3):
                     try:
                         sift_queue.put_nowait(gray_for_validation)
@@ -446,8 +459,9 @@ while cap.isOpened():
                         except queue.Full:
                             pass
 
-            # skip gesture handling this frame (will redraw when H rebuilt)
-            display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, np.eye(3))  # show fallback
+                # show a simple overlay informing we are re-detecting (do not draw identity rectangle)
+                cv.putText(display_img, "REDETECTING MAP...", (10, 120),
+                           cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 3)
 
         # Draw rectangle from stored projected pts if available (prefer stored pts for stability)
         if getattr(model_detector, 'last_rect_pts', None) is not None:

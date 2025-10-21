@@ -415,53 +415,36 @@ class SIFTModelDetectorMP:
 
         return False, None
 
-    def quick_validate_position(self, scene_gray, min_matches=6, margin=30):
+    def quick_validate_position(self, scene_gray, min_matches=6, position_threshold=50):
         """
-        Quick local validation of the stored last_rect_pts against scene_gray.
-        Returns True if position appears valid (>= min_matches), False otherwise.
-        If validation fails, mark requires_homography=True and clear last_rect_pts.
+        Quick validation by attempting fresh feature matching on full frame
+        and checking if the resulting rectangle position is similar to stored position.
+        Returns True if homography still valid, False if template moved.
         """
         if self.last_rect_pts is None or self.H is None:
             return False
 
-        # compute bounding box from last_rect_pts (format Nx1x2)
-        pts = self.last_rect_pts.reshape(-1, 2)
-        xs = pts[:, 0]
-        ys = pts[:, 1]
-        x_min = int(max(0, np.floor(xs.min()) - margin))
-        y_min = int(max(0, np.floor(ys.min()) - margin))
-        x_max = int(min(scene_gray.shape[1] - 1, np.ceil(xs.max()) + margin))
-        y_max = int(min(scene_gray.shape[0] - 1, np.ceil(ys.max()) + margin))
+        # Run a lightweight SIFT match on the full scene
+        keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(scene_gray, None)
 
-        if x_max - x_min < 32 or y_max - y_min < 32:
-            # ROI too small to validate reliably
-            return False
-
-        roi = scene_gray[y_min:y_max, x_min:x_max]
-        if roi.size == 0:
-            return False
-
-        # detect SIFT in ROI
-        kps_scene, desc_scene = self.sift_detector.detectAndCompute(roi, None)
-        if desc_scene is None or len(kps_scene) < 4:
-            # not enough features, consider position invalid
+        if descriptors_scene is None or len(keypoints_scene) < 4:
+            print("quick_validate_position: not enough scene keypoints")
             self.requires_homography = True
             self.last_rect_pts = None
-            print("quick_validate_position: not enough keypoints in ROI -> triggering re-detect")
             return False
 
-        # match descriptors (template -> scene ROI)
+        # Match template to scene
         try:
             FLANN_INDEX_KDTREE = 1
             index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=6)
             search_params = dict(checks=50)
             matcher = cv.FlannBasedMatcher(index_params, search_params)
-            knn_matches = matcher.knnMatch(self.descriptors_sift, desc_scene, k=2)
+            knn_matches = matcher.knnMatch(self.descriptors_sift, descriptors_scene, k=2)
         except Exception as e:
             print(f"quick_validate_position: matcher failed: {e}")
             return False
 
-        # ratio test
+        # Ratio test
         RATIO_THRESH = 0.8
         good_matches = []
         for pair in knn_matches:
@@ -471,16 +454,69 @@ class SIFTModelDetectorMP:
                     good_matches.append(m)
 
         match_count = len(good_matches)
-        print(f"quick_validate_position: found {match_count} matches in ROI (threshold {min_matches})")
+        print(f"quick_validate_position: found {match_count} matches (threshold {min_matches})")
 
         if match_count < min_matches:
-            # mark homography as stale
+            print("quick_validate_position: insufficient matches -> triggering re-detect")
             self.requires_homography = True
             self.last_rect_pts = None
-            print("quick_validate_position: insufficient matches -> triggering re-detect")
             return False
 
-        # validation passed: keep existing H and last_rect_pts
+        # Compute fresh homography from these matches
+        obj = np.empty((len(good_matches), 2), dtype=np.float32)
+        scene = np.empty((len(good_matches), 2), dtype=np.float32)
+
+        for i in range(len(good_matches)):
+            obj[i, 0] = self.keypoints_sift[good_matches[i].queryIdx].pt[0]
+            obj[i, 1] = self.keypoints_sift[good_matches[i].queryIdx].pt[1]
+            scene[i, 0] = keypoints_scene[good_matches[i].trainIdx].pt[0]
+            scene[i, 1] = keypoints_scene[good_matches[i].trainIdx].pt[1]
+
+        try:
+            H_test, mask_out = cv.findHomography(scene, obj, cv.RANSAC, ransacReprojThreshold=8.0)
+            if H_test is None:
+                print("quick_validate_position: could not compute test homography")
+                self.requires_homography = True
+                self.last_rect_pts = None
+                return False
+        except Exception as e:
+            print(f"quick_validate_position: homography computation failed: {e}")
+            self.requires_homography = True
+            self.last_rect_pts = None
+            return False
+
+        # Project template corners using the fresh homography
+        h_t, w_t = self.template_shape
+        obj_corners = np.array([[0, 0], [w_t, 0], [w_t, h_t], [0, h_t]], dtype=np.float32).reshape(-1, 1, 2)
+        try:
+            H_test_inv = np.linalg.inv(H_test)
+            new_pts = cv.perspectiveTransform(obj_corners, H_test_inv)
+        except Exception as e:
+            print(f"quick_validate_position: could not project corners: {e}")
+            self.requires_homography = True
+            self.last_rect_pts = None
+            return False
+
+        # Compare new projected corners to stored corners
+        old_pts = self.last_rect_pts.reshape(-1, 2)
+        new_pts_flat = new_pts.reshape(-1, 2)
+
+        # Compute average distance between corresponding corners
+        distances = np.linalg.norm(old_pts - new_pts_flat, axis=1)
+        avg_distance = np.mean(distances)
+        max_distance = np.max(distances)
+
+        print(f"quick_validate_position: corner movement - avg: {avg_distance:.1f}px, max: {max_distance:.1f}px (threshold: {position_threshold}px)")
+
+        if max_distance > position_threshold:
+            # Template has moved significantly
+            print("quick_validate_position: template position changed -> triggering re-detect")
+            self.requires_homography = True
+            self.last_rect_pts = None
+            return False
+
+        # Position is stable
+        print("quick_validate_position: validation PASSED")
         return True
 
     def get_tracking_status(self):
