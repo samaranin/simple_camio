@@ -1,20 +1,157 @@
 """
 Background worker threads for asynchronous processing.
 
-This module contains worker threads that handle pose detection and SIFT tracking
-in parallel with the main UI loop to maintain responsive frame rates.
+This module contains worker threads that handle pose detection, SIFT tracking,
+and audio playback in parallel with the main UI loop to maintain responsive frame rates.
 """
 
 import threading
 import queue
 import time
 import cv2 as cv
-import numpy as np
 import logging
 from config import WorkerConfig
 from utils import normalize_gesture_location
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Audio Worker ====================
+
+class AudioCommand:
+    """Represents an audio command to be executed."""
+
+    def __init__(self, command_type, **kwargs):
+        """
+        Initialize an audio command.
+
+        Args:
+            command_type (str): Type of command ('play_zone', 'play_welcome', 'play_goodbye',
+                                                  'heartbeat_play', 'heartbeat_pause', etc.)
+            **kwargs: Command-specific parameters
+        """
+        self.command_type = command_type
+        self.params = kwargs
+
+
+class AudioWorker(threading.Thread):
+    """
+    Background thread for handling all audio playback operations.
+
+    This worker processes audio commands from a queue, preventing audio
+    operations from blocking the main processing loop. This improves
+    frame processing consistency and overall system responsiveness.
+    """
+
+    def __init__(self, camio_player, heartbeat_player, crickets_player,
+                 stop_event, queue_maxsize=50):
+        """
+        Initialize the audio worker.
+
+        Args:
+            camio_player (ZoneAudioPlayer): Player for zone-based audio
+            heartbeat_player (AmbientSoundPlayer): Heartbeat sound player
+            crickets_player (AmbientSoundPlayer): Ambient crickets player
+            stop_event (threading.Event): Event to signal shutdown
+            queue_maxsize (int): Maximum size of command queue
+        """
+        super().__init__(daemon=True, name="AudioWorker")
+
+        self.camio_player = camio_player
+        self.heartbeat_player = heartbeat_player
+        self.crickets_player = crickets_player
+        self.stop_event = stop_event
+        self.command_queue = queue.Queue(maxsize=queue_maxsize)
+
+        logger.info("AudioWorker initialized")
+
+    def enqueue_command(self, command):
+        """
+        Add an audio command to the queue (non-blocking).
+
+        Args:
+            command (AudioCommand): Command to execute
+
+        Returns:
+            bool: True if command was enqueued, False if queue was full
+        """
+        try:
+            self.command_queue.put_nowait(command)
+            return True
+        except queue.Full:
+            logger.warning(f"Audio queue full, dropping command: {command.command_type}")
+            return False
+
+    def run(self):
+        """Main worker loop - processes audio commands from queue."""
+        logger.info("AudioWorker started")
+
+        while not self.stop_event.is_set():
+            try:
+                # Wait for command with timeout to allow checking stop_event
+                command = self.command_queue.get(timeout=0.1)
+                self._execute_command(command)
+                self.command_queue.task_done()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error processing audio command: {e}", exc_info=True)
+
+        logger.info("AudioWorker stopped")
+
+    def _execute_command(self, command):
+        """
+        Execute a single audio command.
+
+        Args:
+            command (AudioCommand): Command to execute
+        """
+        try:
+            cmd_type = command.command_type
+            params = command.params
+
+            if cmd_type == 'play_zone':
+                zone_id = params.get('zone_id')
+                gesture_status = params.get('gesture_status', 'pointing')
+                self.camio_player.convey(zone_id, gesture_status)
+
+            elif cmd_type == 'play_welcome':
+                self.camio_player.play_welcome()
+
+            elif cmd_type == 'play_goodbye':
+                self.camio_player.play_goodbye()
+
+            elif cmd_type == 'heartbeat_play':
+                self.heartbeat_player.play_sound()
+
+            elif cmd_type == 'heartbeat_pause':
+                self.heartbeat_player.pause_sound()
+
+            elif cmd_type == 'crickets_play':
+                self.crickets_player.play_sound()
+
+            elif cmd_type == 'crickets_pause':
+                self.crickets_player.pause_sound()
+
+            elif cmd_type == 'toggle_blips':
+                self.camio_player.enable_blips = not self.camio_player.enable_blips
+                status = "enabled" if self.camio_player.enable_blips else "disabled"
+                logger.info(f"Blips {status}")
+
+            else:
+                logger.warning(f"Unknown audio command type: {cmd_type}")
+
+        except Exception as e:
+            logger.error(f"Error executing command {command.command_type}: {e}", exc_info=True)
+
+    def stop(self):
+        """Signal the worker to stop."""
+        logger.info("Stopping AudioWorker...")
+        self.stop_event.set()
+
+
+# ==================== Pose Worker ====================
 
 
 class PoseWorker(threading.Thread):

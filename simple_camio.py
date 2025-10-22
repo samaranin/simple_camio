@@ -22,7 +22,7 @@ from gesture_detection import GestureDetector, MovementMedianFilter
 from pose_detector import PoseDetectorMP
 from sift_detector import SIFTModelDetectorMP
 from interaction_policy import InteractionPolicy2D
-from workers import PoseWorker, SIFTWorker
+from workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
 
 # Configure logging
 logging.basicConfig(
@@ -66,7 +66,7 @@ def initialize_system(model_path):
 
     # Configure audio
     heartbeat_player.set_volume(AudioConfig.HEARTBEAT_VOLUME)
-    camio_player.play_welcome()
+    # Note: Welcome message will be played by AudioWorker after it starts
 
     logger.info("System initialization complete")
 
@@ -144,9 +144,21 @@ def create_worker_threads(components, stop_event):
         stop_event=stop_event
     )
 
+    # Create audio worker for non-blocking audio playback
+    audio_worker = AudioWorker(
+        components['camio_player'],
+        components['heartbeat_player'],
+        components['crickets_player'],
+        stop_event
+    )
+
     # Start workers
     pose_worker.start()
     sift_worker.start()
+    audio_worker.start()
+
+    # Play welcome message through audio worker
+    audio_worker.enqueue_command(AudioCommand('play_welcome'))
 
     logger.info("Worker threads started")
 
@@ -155,7 +167,8 @@ def create_worker_threads(components, stop_event):
         'sift_queue': sift_queue,
         'lock': lock,
         'pose_worker': pose_worker,
-        'sift_worker': sift_worker
+        'sift_worker': sift_worker,
+        'audio_worker': audio_worker
     }
 
 
@@ -214,7 +227,7 @@ def feed_worker_queues(frame, gray, workers, model_detector):
 
 
 def process_gestures_and_audio(gesture_loc, gesture_status, components,
-                               last_double_tap_ts):
+                               last_double_tap_ts, audio_worker):
     """
     Process detected gestures and trigger appropriate audio feedback.
 
@@ -223,12 +236,13 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         gesture_status: Status of the gesture
         components (dict): System components
         last_double_tap_ts (float): Timestamp of last double-tap
+        audio_worker (AudioWorker): Audio worker for non-blocking playback
 
     Returns:
         float: Updated last_double_tap_ts
     """
     if not is_gesture_valid(gesture_loc):
-        components['heartbeat_player'].pause_sound()
+        audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
         return last_double_tap_ts
 
     # Handle double-tap
@@ -238,16 +252,20 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         if now - last_double_tap_ts > TapDetectionConfig.DOUBLE_TAP_COOLDOWN_MAIN:
             try:
                 zone_id = components['interact'].push_gesture(gesture_loc)
-                components['camio_player'].convey(zone_id, 'double_tap')
+                audio_worker.enqueue_command(
+                    AudioCommand('play_zone', zone_id=zone_id, gesture_status='double_tap')
+                )
                 last_double_tap_ts = now
                 logger.info(f"Double-tap processed for zone {zone_id}")
             except Exception as e:
                 logger.error(f"Error handling double_tap: {e}")
     else:
         # Normal gesture processing
-        components['heartbeat_player'].play_sound()
+        audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
         zone_id = components['interact'].push_gesture(gesture_loc)
-        components['camio_player'].convey(zone_id, gesture_status)
+        audio_worker.enqueue_command(
+            AudioCommand('play_zone', zone_id=zone_id, gesture_status=gesture_status)
+        )
 
     return last_double_tap_ts
 
@@ -367,9 +385,7 @@ def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
 
     # Toggle blips
     if waitkey == ord('b'):
-        components['camio_player'].enable_blips = not components['camio_player'].enable_blips
-        status = "enabled" if components['camio_player'].enable_blips else "disabled"
-        logger.info(f"Blips {status}")
+        workers['audio_worker'].enqueue_command(AudioCommand('toggle_blips'))
 
     return True
 
@@ -417,8 +433,8 @@ def run_main_loop(cap, components, workers, stop_event):
         # Process based on map detection status
         if components['model_detector'].H is None:
             # Map not detected - play ambient crickets
-            components['heartbeat_player'].pause_sound()
-            components['crickets_player'].play_sound()
+            workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
+            workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
         else:
             # Map detected - increment age counter
             try:
@@ -434,7 +450,8 @@ def run_main_loop(cap, components, workers, stop_event):
 
             # Process gestures and audio
             last_double_tap_ts = process_gestures_and_audio(
-                gesture_loc, gesture_status, components, last_double_tap_ts
+                gesture_loc, gesture_status, components, last_double_tap_ts,
+                workers['audio_worker']
             )
 
         # Draw UI overlay
@@ -465,19 +482,23 @@ def cleanup(cap, components, workers):
     """
     logger.info("Cleaning up resources...")
 
+    # Play goodbye message through audio worker before stopping it
+    try:
+        workers['audio_worker'].enqueue_command(AudioCommand('play_goodbye'))
+        # Give it a moment to play
+        time.sleep(0.5)
+    except Exception as e:
+        logger.error(f"Error queueing goodbye message: {e}")
+
     # Stop worker threads
     workers['pose_worker'].stop()
     workers['sift_worker'].stop()
+    workers['audio_worker'].stop()
 
     # Wait for threads to exit
     workers['pose_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
     workers['sift_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
-
-    # Play goodbye message
-    try:
-        components['camio_player'].play_goodbye()
-    except Exception as e:
-        logger.error(f"Error playing goodbye message: {e}")
+    workers['audio_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
 
     # Stop ambient sounds
     components['heartbeat_player'].pause_sound()
