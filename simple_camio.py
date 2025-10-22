@@ -11,6 +11,7 @@ from simple_camio_2d import InteractionPolicy2D, CamIOPlayer2D
 from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP
 import threading
 import queue
+import signal
 
 
 class MovementFilter:
@@ -191,7 +192,7 @@ def load_map_parameters(filename):
 
 # Insert worker threads for async processing
 class PoseWorker(threading.Thread):
-    def __init__(self, pose_detector, in_queue, lock, processing_scale=0.5):
+    def __init__(self, pose_detector, in_queue, lock, processing_scale=0.5, stop_event=None):
         super().__init__(daemon=True)
         self.pose_detector = pose_detector
         self.in_queue = in_queue
@@ -199,9 +200,10 @@ class PoseWorker(threading.Thread):
         self.processing_scale = processing_scale
         self.latest = (None, None, None)  # gesture_loc, status, annotated_image
         self.running = True
+        self.stop_event = stop_event
 
     def run(self):
-        while self.running:
+        while self.running and (self.stop_event is None or not self.stop_event.is_set()):
             try:
                 frame, H = self.in_queue.get(timeout=0.1)
             except queue.Empty:
@@ -231,10 +233,12 @@ class PoseWorker(threading.Thread):
 
     def stop(self):
         self.running = False
+        if self.stop_event is not None:
+            self.stop_event.set()
 
 
 class SIFTWorker(threading.Thread):
-    def __init__(self, sift_detector, in_queue, lock):
+    def __init__(self, sift_detector, in_queue, lock, stop_event=None):
         super().__init__(daemon=True)
         self.sift_detector = sift_detector
         self.in_queue = in_queue
@@ -243,6 +247,7 @@ class SIFTWorker(threading.Thread):
         self.force_redetect = False
         self.validate_interval = 2.0
         self._last_validation_ts = 0.0
+        self.stop_event = stop_event
 
     def run(self):
         """
@@ -251,7 +256,7 @@ class SIFTWorker(threading.Thread):
         - Else: periodically run quick validation in the background.
         """
         RETRIES = 3
-        while self.running:
+        while self.running and (self.stop_event is None or not self.stop_event.is_set()):
             try:
                 frame = self.in_queue.get(timeout=0.2)  # frame is expected to be grayscale full-res
             except queue.Empty:
@@ -321,6 +326,8 @@ class SIFTWorker(threading.Thread):
 
     def stop(self):
         self.running = False
+        if self.stop_event is not None:
+            self.stop_event.set()
 
 
 parser = argparse.ArgumentParser(description='Code for CamIO.')
@@ -358,8 +365,16 @@ except Exception:
 pose_queue = queue.Queue(maxsize=1)
 sift_queue = queue.Queue(maxsize=1)
 lock = threading.Lock()
-pose_worker = PoseWorker(pose_detector, pose_queue, lock, processing_scale=0.35)
-sift_worker = SIFTWorker(model_detector, sift_queue, lock)
+
+# Add a stop event and attach a SIGINT handler
+stop_event = threading.Event()
+def _signal_handler(sig, frame):
+    print("Signal received, shutting down...")
+    stop_event.set()
+signal.signal(signal.SIGINT, _signal_handler)
+
+pose_worker = PoseWorker(pose_detector, pose_queue, lock, processing_scale=0.35, stop_event=stop_event)
+sift_worker = SIFTWorker(model_detector, sift_queue, lock, stop_event=stop_event)
 pose_worker.start()
 sift_worker.start()
 
@@ -375,127 +390,140 @@ rect_flash_remaining = 0
 RECT_FLASH_FRAMES = 10
 
 # Main loop - avoid heavy work in the UI thread
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        print("No camera image returned.")
-        break
+try:
+    while cap.isOpened() and not stop_event.is_set():
+        ret, frame = cap.read()
+        if not ret:
+            print("No camera image returned.")
+            break
 
-    now_time = time.time()
+        now_time = time.time()
 
-    # Prepare grayscale once and always feed the SIFT worker the newest frame (queue drops old)
-    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-    try:
-        sift_queue.put_nowait(gray)
-    except queue.Full:
-        try:
-            _ = sift_queue.get_nowait()
-        except queue.Empty:
-            pass
+        # Prepare grayscale once and always feed the SIFT worker the newest frame (queue drops old)
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
         try:
             sift_queue.put_nowait(gray)
         except queue.Full:
-            pass
+            try:
+                _ = sift_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                sift_queue.put_nowait(gray)
+            except queue.Full:
+                pass
 
-    # Push frame for pose worker (no copy; detect() will not draw by default)
-    H_current = model_detector.H if model_detector.H is not None else np.eye(3)
-    try:
-        pose_queue.put_nowait((frame, H_current))
-    except queue.Full:
-        try:
-            _ = pose_queue.get_nowait()
-        except queue.Empty:
-            pass
+        # Push frame for pose worker (no copy; detect() will not draw by default)
+        H_current = model_detector.H if model_detector.H is not None else np.eye(3)
         try:
             pose_queue.put_nowait((frame, H_current))
         except queue.Full:
-            pass
-
-    # Retrieve latest pose worker output
-    with lock:
-        gesture_loc, gesture_status, annotated = pose_worker.latest
-
-    display_img = frame if (annotated is None) else annotated
-
-    # If detector reports homography was updated, trigger flash highlight
-    if getattr(model_detector, 'homography_updated', False):
-        rect_flash_remaining = RECT_FLASH_FRAMES
-        model_detector.homography_updated = False
-
-    # PROCESS GESTURES AND INTERACTION
-    if model_detector.H is None:
-        heartbeat_player.pause_sound()
-        crickets_player.play_sound()
-    else:
-        # Ensure age counter increments even if detect() isn't called every frame
-        try:
-            model_detector.frames_since_last_detection += 1
-        except Exception:
-            model_detector.frames_since_last_detection = 1
-
-        # Draw rectangle from stored projected pts if available
-        if getattr(model_detector, 'last_rect_pts', None) is not None:
-            if rect_flash_remaining > 0:
-                display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 255), thickness=5)
-                rect_flash_remaining -= 1
-            else:
-                display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 0), thickness=3)
-        else:
-            display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
-
-        if not _gesture_valid(gesture_loc):
-            heartbeat_player.pause_sound()
-        else:
-            heartbeat_player.play_sound()
-            zone_id = interact.push_gesture(gesture_loc)
-            camio_player.convey(zone_id, gesture_status)
-
-    # Add status overlay
-    status_text = model_detector.get_tracking_status()
-    cv.putText(display_img, status_text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-    # Add FPS
-    prev_time = timer
-    timer = time.time()
-    elapsed_time = timer - prev_time
-    if elapsed_time > 0:
-        fps_text = f"FPS: {1/elapsed_time:.1f}"
-        cv.putText(display_img, fps_text, (10, 60), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-    cv.imshow('image reprojection', display_img)
-    waitkey = cv.waitKey(1)
-    if waitkey == 27 or waitkey == ord('q'):
-        print('Exiting...')
-        break
-    if waitkey == ord('h'):
-        print("Manual re-detection triggered by user")
-        gray_now = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        model_detector.requires_homography = True
-        model_detector.last_rect_pts = None
-        for _ in range(3):
             try:
-                sift_queue.put_nowait(gray_now)
+                _ = pose_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                pose_queue.put_nowait((frame, H_current))
             except queue.Full:
-                try:
-                    _ = sift_queue.get_nowait()
-                except queue.Empty:
-                    pass
+                pass
+
+        # Retrieve latest pose worker output
+        with lock:
+            gesture_loc, gesture_status, annotated = pose_worker.latest
+
+        display_img = frame if (annotated is None) else annotated
+
+        # If detector reports homography was updated, trigger flash highlight
+        if getattr(model_detector, 'homography_updated', False):
+            rect_flash_remaining = RECT_FLASH_FRAMES
+            model_detector.homography_updated = False
+
+        # PROCESS GESTURES AND INTERACTION
+        if model_detector.H is None:
+            heartbeat_player.pause_sound()
+            crickets_player.play_sound()
+        else:
+            # Ensure age counter increments even if detect() isn't called every frame
+            try:
+                model_detector.frames_since_last_detection += 1
+            except Exception:
+                model_detector.frames_since_last_detection = 1
+
+            # Draw rectangle from stored projected pts if available
+            if getattr(model_detector, 'last_rect_pts', None) is not None:
+                if rect_flash_remaining > 0:
+                    display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 255), thickness=5)
+                    rect_flash_remaining -= 1
+                else:
+                    display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 0), thickness=3)
+            else:
+                display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
+
+            if not _gesture_valid(gesture_loc):
+                heartbeat_player.pause_sound()
+            else:
+                heartbeat_player.play_sound()
+                zone_id = interact.push_gesture(gesture_loc)
+                camio_player.convey(zone_id, gesture_status)
+
+        # Add status overlay
+        status_text = model_detector.get_tracking_status()
+        cv.putText(display_img, status_text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # Add FPS
+        prev_time = timer
+        timer = time.time()
+        elapsed_time = timer - prev_time
+        if elapsed_time > 0:
+            fps_text = f"FPS: {1/elapsed_time:.1f}"
+            cv.putText(display_img, fps_text, (10, 60), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        cv.imshow('image reprojection', display_img)
+        waitkey = cv.waitKey(1)
+        if waitkey == 27 or waitkey == ord('q'):
+            print('Exiting...')
+            stop_event.set()
+            break
+        if waitkey == ord('h'):
+            print("Manual re-detection triggered by user")
+            gray_now = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+            model_detector.requires_homography = True
+            model_detector.last_rect_pts = None
+            for _ in range(3):
                 try:
                     sift_queue.put_nowait(gray_now)
                 except queue.Full:
-                    pass
-        sift_worker.trigger_redetect()
-    if waitkey == ord('b'):
-        camio_player.enable_blips = not camio_player.enable_blips
-        print("Blips " + ("enabled" if camio_player.enable_blips else "disabled"))
+                    try:
+                        _ = sift_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        sift_queue.put_nowait(gray_now)
+                    except queue.Full:
+                        pass
+            sift_worker.trigger_redetect()
+        if waitkey == ord('b'):
+            camio_player.enable_blips = not camio_player.enable_blips
+            print("Blips " + ("enabled" if camio_player.enable_blips else "disabled"))
 
-    pyglet.clock.tick()
-    pyglet.app.platform_event_loop.dispatch_posted_events()
+        pyglet.clock.tick()
+        pyglet.app.platform_event_loop.dispatch_posted_events()
+
+except KeyboardInterrupt:
+    print("KeyboardInterrupt received, shutting down...")
+    stop_event.set()
 
 # shutdown
 pose_worker.stop()
 sift_worker.stop()
-camio_player.play_goodbye()
+# give threads a moment to exit cleanly
+pose_worker.join(timeout=2.0)
+sift_worker.join(timeout=2.0)
+
+try:
+    camio_player.play_goodbye()
+except Exception:
+    pass
 heartbeat_player.pause_sound()
 crickets_player.pause_sound()
 time.sleep(1)
