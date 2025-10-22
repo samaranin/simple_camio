@@ -8,37 +8,35 @@ from google.protobuf.json_format import MessageToDict
 class PoseDetectorMP:
     def __init__(self, model):
         self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(model_complexity=0, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        self.hands = self.mp_hands.Hands(
+            model_complexity=0,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            max_num_hands=2
+        )
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         self.image_map_color = cv.imread(model['filename'], cv.IMREAD_COLOR)
 
-    def detect(self, image, H, _, processing_scale=0.5):
+    def detect(self, image, H, _, processing_scale=0.5, draw=False):
         """
         Process a downscaled copy of `image` with MediaPipe to speed up processing.
-        `processing_scale` controls the resize factor for the detector (0 < scale <= 1).
-        Landmark coordinates are converted back relative to the original image size.
+        If `draw` is False, no overlay is drawn and no full-size copy is made.
         """
-        # create a downscaled copy for MediaPipe (reduce CPU)
         if processing_scale < 1.0:
             small = cv.resize(image, (0, 0), fx=processing_scale, fy=processing_scale, interpolation=cv.INTER_LINEAR)
         else:
             small = image
 
-        # MediaPipe expects RGB
         small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
         results = self.hands.process(small_rgb)
 
-        # prepare output image (draw on original size)
-        img_out = image.copy()
+        img_out = image.copy() if draw else None
         index_pos = None
         movement_status = None
 
         if results.multi_hand_landmarks:
             for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                # handedness
-                # use original normalized coordinates (they are scale-invariant) for math/drawing
-                # compute coordinates using original image size
                 orig_h, orig_w = image.shape[0], image.shape[1]
                 handedness = MessageToDict(results.multi_handedness[h])['classification'][0]['label']
                 coors = np.zeros((4, 3), dtype=float)
@@ -91,13 +89,13 @@ class PoseDetectorMP:
                 overall = ratio_index - ((ratio_middle + ratio_ring + ratio_little) / 3)
                 is_pointing = is_pointing or overall > 0.1
 
-                # draw landmarks on the original image (MediaPipe drawing uses normalized coords)
-                self.mp_drawing.draw_landmarks(
-                    img_out,
-                    hand_landmarks,
-                    self.mp_hands.HAND_CONNECTIONS,
-                    self.mp_drawing_styles.get_default_hand_landmarks_style(),
-                    self.mp_drawing_styles.get_default_hand_connections_style())
+                if draw:
+                    self.mp_drawing.draw_landmarks(
+                        img_out,
+                        hand_landmarks,
+                        self.mp_hands.HAND_CONNECTIONS,
+                        self.mp_drawing_styles.get_default_hand_landmarks_style(),
+                        self.mp_drawing_styles.get_default_hand_connections_style())
 
                 # fingertip 8 in normalized coords -> convert to original pixels
                 pos_x = hand_landmarks.landmark[8].x * orig_w
@@ -135,7 +133,6 @@ class PoseDetectorMP:
                 normalized = None
 
         return normalized, movement_status, img_out
-
 
     def ratio(self, coors):  # ratio is 1 if points are collinear, lower otherwise (minimum is 0)
         d = np.linalg.norm(coors[0, :] - coors[3, :])
@@ -216,6 +213,7 @@ class SIFTModelDetectorMP:
         # New: store whether H was updated and the projected rectangle pts in camera coords
         self.homography_updated = False
         self.last_rect_pts = None  # will hold Nx1x2 array same as cv.perspectiveTransform output
+        self.debug = False  # gate verbose prints
 
         print(f"Template features: SIFT={len(self.keypoints_sift)}, ORB={len(self.keypoints_orb)}")
 
@@ -294,7 +292,8 @@ class SIFTModelDetectorMP:
             if len(self.tracking_quality_history) > 10:
                 self.tracking_quality_history.pop(0)
 
-            print(f"Validation: {match_count} matches")
+            if self.debug:
+                print(f"Validation: {match_count} matches")
 
             if match_count < self.MIN_TRACKING_QUALITY:
                 print("Validation failed: triggering re-detection")
@@ -303,7 +302,8 @@ class SIFTModelDetectorMP:
             else:
                 self.frames_since_last_detection = 0
         except Exception as e:
-            print(f"Validation error: {e}")
+            if self.debug:
+                print(f"Validation error: {e}")
             self.requires_homography = True
             self.H = None
 
@@ -330,7 +330,8 @@ class SIFTModelDetectorMP:
                 if m.distance < RATIO_THRESH * n.distance:
                     good_matches.append(m)
 
-        print(f"SIFT good matches: {len(good_matches)}")
+        if self.debug:
+            print(f"SIFT good matches: {len(good_matches)}")
 
         if len(good_matches) < 4:
             return False, None
@@ -355,7 +356,8 @@ class SIFTModelDetectorMP:
                 if m.distance < 0.75 * n.distance:
                     good_matches.append(m)
 
-        print(f"ORB good matches: {len(good_matches)}")
+        if self.debug:
+            print(f"ORB good matches: {len(good_matches)}")
 
         if len(good_matches) < 4:
             return False, None
@@ -383,9 +385,9 @@ class SIFTModelDetectorMP:
 
         if H is None:
             return False, None
-
         total = int(np.sum(mask_out))
-        print(f'{method_name} inlier count: {total}')
+        if self.debug:
+            print(f'{method_name} inlier count: {total}')
 
         if total >= self.MIN_INLIER_COUNT:
             # If we accept the homography, store it and compute the rectangle projected into camera frame
@@ -410,7 +412,8 @@ class SIFTModelDetectorMP:
             # flag update so main loop can highlight newly rebuilt rectangle
             self.homography_updated = True
 
-            print(f"Homography locked using {method_name}")
+            if self.debug:
+                print(f"Homography locked using {method_name}")
             return True, H
 
         return False, None
@@ -428,7 +431,8 @@ class SIFTModelDetectorMP:
         keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(scene_gray, None)
 
         if descriptors_scene is None or len(keypoints_scene) < 4:
-            print("quick_validate_position: not enough scene keypoints")
+            if self.debug:
+                print("quick_validate_position: not enough scene keypoints")
             self.requires_homography = True
             self.last_rect_pts = None
             return False
@@ -454,10 +458,12 @@ class SIFTModelDetectorMP:
                     good_matches.append(m)
 
         match_count = len(good_matches)
-        print(f"quick_validate_position: found {match_count} matches (threshold {min_matches})")
+        if self.debug:
+            print(f"quick_validate_position: found {match_count} matches (threshold {min_matches})")
 
         if match_count < min_matches:
-            print("quick_validate_position: insufficient matches -> triggering re-detect")
+            if self.debug:
+                print("quick_validate_position: insufficient matches -> triggering re-detect")
             self.requires_homography = True
             self.last_rect_pts = None
             return False
@@ -475,12 +481,14 @@ class SIFTModelDetectorMP:
         try:
             H_test, mask_out = cv.findHomography(scene, obj, cv.RANSAC, ransacReprojThreshold=8.0)
             if H_test is None:
-                print("quick_validate_position: could not compute test homography")
+                if self.debug:
+                    print("quick_validate_position: could not compute test homography")
                 self.requires_homography = True
                 self.last_rect_pts = None
                 return False
         except Exception as e:
-            print(f"quick_validate_position: homography computation failed: {e}")
+            if self.debug:
+                print(f"quick_validate_position: homography computation failed: {e}")
             self.requires_homography = True
             self.last_rect_pts = None
             return False
@@ -506,17 +514,17 @@ class SIFTModelDetectorMP:
         avg_distance = np.mean(distances)
         max_distance = np.max(distances)
 
-        print(f"quick_validate_position: corner movement - avg: {avg_distance:.1f}px, max: {max_distance:.1f}px (threshold: {position_threshold}px)")
+        if self.debug:
+            print(f"quick_validate_position: corner movement - avg: {avg_distance:.1f}px, max: {max_distance:.1f}px (threshold: {position_threshold}px)")
 
         if max_distance > position_threshold:
-            # Template has moved significantly
-            print("quick_validate_position: template position changed -> triggering re-detect")
+            if self.debug:
+                print("quick_validate_position: template position changed -> triggering re-detect")
             self.requires_homography = True
             self.last_rect_pts = None
             return False
-
-        # Position is stable
-        print("quick_validate_position: validation PASSED")
+        if self.debug:
+            print("quick_validate_position: validation PASSED")
         return True
 
     def get_tracking_status(self):

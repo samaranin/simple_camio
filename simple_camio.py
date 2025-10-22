@@ -208,10 +208,11 @@ class PoseWorker(threading.Thread):
                 continue
             # run detector (downscaled inside)
             try:
-                gesture_loc, gesture_status, annotated = self.pose_detector.detect(frame, H, None, processing_scale=self.processing_scale)
+                gesture_loc, gesture_status, annotated = self.pose_detector.detect(
+                    frame, H, None, processing_scale=self.processing_scale, draw=True
+                )
             except Exception as e:
-                gesture_loc, gesture_status, annotated = None, None, frame
-
+                gesture_loc, gesture_status, annotated = None, None, None
             # Defensive normalization: ensure gesture_loc is either None or a 1D ndarray with 3 elements
             if gesture_loc is not None:
                 arr = np.asarray(gesture_loc)
@@ -240,11 +241,14 @@ class SIFTWorker(threading.Thread):
         self.lock = lock
         self.running = True
         self.force_redetect = False
+        self.validate_interval = 2.0
+        self._last_validation_ts = 0.0
 
     def run(self):
         """
-        Process frames from the queue. Use full-resolution frames only (no scaling).
-        Try a few lightweight preprocessing attempts per frame to improve robustness.
+        Process frames from the queue.
+        - If homography is missing or forced: run full detection attempts.
+        - Else: periodically run quick validation in the background.
         """
         RETRIES = 3
         while self.running:
@@ -253,38 +257,51 @@ class SIFTWorker(threading.Thread):
             except queue.Empty:
                 continue
 
-            detected = False
-            # Try a few simple preprocessing attempts
-            attempts = []
-            attempts.append(frame)  # raw
-            # CLAHE
             try:
-                clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                attempts.append(clahe.apply(frame))
-            except Exception:
-                pass
-            # slight blur
-            try:
-                attempts.append(cv.GaussianBlur(frame, (5,5), 0))
-            except Exception:
-                pass
+                # If we already have a homography and no force, do lightweight validation on a cadence
+                if (not self.sift_detector.requires_homography) and (not self.force_redetect):
+                    now = time.time()
+                    if now - self._last_validation_ts >= self.validate_interval:
+                        self._last_validation_ts = now
+                        valid = self.sift_detector.quick_validate_position(frame, min_matches=6, position_threshold=40)
+                        if not valid:
+                            # Mark stale and immediately try a re-detect using the current frame
+                            self.sift_detector.requires_homography = True
+                            self.sift_detector.last_rect_pts = None
+                            # continue to detection path below
+                        else:
+                            # Nothing else to do this iteration
+                            continue
 
-            try:
+                # Either we need homography or a manual re-detect was requested
+                detected = False
+                attempts = [frame]
+                # CLAHE
+                try:
+                    clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    attempts.append(clahe.apply(frame))
+                except Exception:
+                    pass
+                # slight blur
+                try:
+                    attempts.append(cv.GaussianBlur(frame, (5, 5), 0))
+                except Exception:
+                    pass
+
                 for attempt_img in attempts:
-                    # call detector on full-resolution grayscale
                     try:
                         retval, H, _ = self.sift_detector.detect(attempt_img, force_redetect=self.force_redetect)
-                    except Exception as e:
+                    except Exception:
                         retval, H = False, None
 
-                    # consume force flag after first attempt
+                    # consume force flag
                     if self.force_redetect:
                         self.force_redetect = False
 
                     if retval and H is not None:
                         detected = True
                         break
-                # final attempt: if not found, try a couple more raw retries
+
                 if not detected:
                     for _ in range(RETRIES):
                         try:
@@ -292,14 +309,11 @@ class SIFTWorker(threading.Thread):
                         except Exception:
                             retval, H = False, None
                         if retval and H is not None:
-                            detected = True
                             break
-            except Exception as e:
-                print(f"SIFTWorker detection error: {e}")
-                detected = False
 
-            # detection result updates model_detector.H and last_rect_pts internally
-            # loop continues to process next queued frame
+            except Exception as e:
+                print(f"SIFTWorker error: {e}")
+                # loop continues
 
     def trigger_redetect(self):
         """Manually trigger re-detection"""
@@ -330,16 +344,21 @@ if model["modelType"] == "sift_2d_mediapipe":
     heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
 
 heartbeat_player.set_volume(.05)
-cap = cv.VideoCapture(cam_port)
+cap = cv.VideoCapture(cam_port, cv.CAP_DSHOW)
 cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)
 cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)
 cap.set(cv.CAP_PROP_FOCUS, 0)
+# Reduce latency in some backends
+try:
+    cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
+except Exception:
+    pass
 
 # Create queues and workers
 pose_queue = queue.Queue(maxsize=1)
 sift_queue = queue.Queue(maxsize=1)
 lock = threading.Lock()
-pose_worker = PoseWorker(pose_detector, pose_queue, lock, processing_scale=0.5)
+pose_worker = PoseWorker(pose_detector, pose_queue, lock, processing_scale=0.35)
 sift_worker = SIFTWorker(model_detector, sift_queue, lock)
 pose_worker.start()
 sift_worker.start()
@@ -351,18 +370,11 @@ print("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
 def _gesture_valid(g):
     return (g is not None) and (hasattr(g, "__len__")) and (np.asarray(g).size >= 3)
 
-# Add a flash counter so rectangle highlight shows for a few frames after homography rebuild
+# Remove validate_counter; keep flash counters
 rect_flash_remaining = 0
-RECT_FLASH_FRAMES = 10  # number of frames highlight persists after re-detection
+RECT_FLASH_FRAMES = 10
 
-# validation cadence (time-based)
-VALIDATE_INTERVAL_SECONDS = 2.0  # run quick validation every N seconds
-_last_validation_time = 0.0
-
-# Remove validate_counter (was unreliable)
-# validate_counter = 0  # removed
-
-# Main loop - FIXED: all processing before display
+# Main loop - avoid heavy work in the UI thread
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
@@ -371,37 +383,31 @@ while cap.isOpened():
 
     now_time = time.time()
 
-    # We will need a grayscale copy sometimes (SIFT queue or quick validation)
-    gray_for_validation = None
-
-    # Push frame for SIFT if needed (only when detector needs homography)
-    if model_detector.requires_homography:
-        # ensure we have grayscale for SIFT worker
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        gray_for_validation = gray
+    # Prepare grayscale once and always feed the SIFT worker the newest frame (queue drops old)
+    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    try:
+        sift_queue.put_nowait(gray)
+    except queue.Full:
+        try:
+            _ = sift_queue.get_nowait()
+        except queue.Empty:
+            pass
         try:
             sift_queue.put_nowait(gray)
         except queue.Full:
-            try:
-                _ = sift_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                sift_queue.put_nowait(gray)
-            except queue.Full:
-                pass
+            pass
 
-    # Push frame for pose worker
+    # Push frame for pose worker (no copy; detect() will not draw by default)
     H_current = model_detector.H if model_detector.H is not None else np.eye(3)
     try:
-        pose_queue.put_nowait((frame.copy(), H_current))
+        pose_queue.put_nowait((frame, H_current))
     except queue.Full:
         try:
             _ = pose_queue.get_nowait()
         except queue.Empty:
             pass
         try:
-            pose_queue.put_nowait((frame.copy(), H_current))
+            pose_queue.put_nowait((frame, H_current))
         except queue.Full:
             pass
 
@@ -409,16 +415,15 @@ while cap.isOpened():
     with lock:
         gesture_loc, gesture_status, annotated = pose_worker.latest
 
-    display_img = annotated if (annotated is not None) else frame
+    display_img = frame if (annotated is None) else annotated
 
     # If detector reports homography was updated, trigger flash highlight
     if getattr(model_detector, 'homography_updated', False):
         rect_flash_remaining = RECT_FLASH_FRAMES
-        model_detector.homography_updated = False  # consume the event
+        model_detector.homography_updated = False
 
     # PROCESS GESTURES AND INTERACTION
     if model_detector.H is None:
-        # No homography yet
         heartbeat_player.pause_sound()
         crickets_player.play_sound()
     else:
@@ -428,61 +433,20 @@ while cap.isOpened():
         except Exception:
             model_detector.frames_since_last_detection = 1
 
-        # Time-based quick validation (more reliable than previous counter)
-        if now_time - _last_validation_time >= VALIDATE_INTERVAL_SECONDS:
-            _last_validation_time = now_time
-            # produce gray if not already produced
-            if gray_for_validation is None:
-                gray_for_validation = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-            # Use position_threshold of 30-50 pixels to detect movement
-            valid = model_detector.quick_validate_position(gray_for_validation, min_matches=6, position_threshold=40)
-            if not valid:
-                # mark homography stale and prepare for re-detection
-                model_detector.requires_homography = True
-                model_detector.last_rect_pts = None
-                model_detector.homography_updated = False
-
-                # request worker to re-detect immediately
-                sift_worker.trigger_redetect()
-
-                # enqueue current gray frame several times for quick consumption
-                for _ in range(3):
-                    try:
-                        sift_queue.put_nowait(gray_for_validation)
-                    except queue.Full:
-                        try:
-                            _ = sift_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                        try:
-                            sift_queue.put_nowait(gray_for_validation)
-                        except queue.Full:
-                            pass
-
-                # show a simple overlay informing we are re-detecting (do not draw identity rectangle)
-                cv.putText(display_img, "REDETECTING MAP...", (10, 120),
-                           cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 3)
-
-        # Draw rectangle from stored projected pts if available (prefer stored pts for stability)
+        # Draw rectangle from stored projected pts if available
         if getattr(model_detector, 'last_rect_pts', None) is not None:
             if rect_flash_remaining > 0:
-                # highlight newly rebuilt rectangle
                 display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 255), thickness=5)
                 rect_flash_remaining -= 1
             else:
                 display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 0), thickness=3)
         else:
-            # fallback: compute from current H each frame (existing behavior)
             display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
 
         if not _gesture_valid(gesture_loc):
-            # Have homography but no valid gesture detected
             heartbeat_player.pause_sound()
         else:
-            # Have both homography and hand gesture
             heartbeat_player.play_sound()
-
-            # Determine zone and play audio
             zone_id = interact.push_gesture(gesture_loc)
             camio_player.convey(zone_id, gesture_status)
 
@@ -498,19 +462,16 @@ while cap.isOpened():
         fps_text = f"FPS: {1/elapsed_time:.1f}"
         cv.putText(display_img, fps_text, (10, 60), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    # NOW DISPLAY (after all processing is done)
     cv.imshow('image reprojection', display_img)
     waitkey = cv.waitKey(1)
     if waitkey == 27 or waitkey == ord('q'):
         print('Exiting...')
         break
     if waitkey == ord('h'):
-        # Manual re-detection: enqueue current grayscale frame and trigger worker
         print("Manual re-detection triggered by user")
         gray_now = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
         model_detector.requires_homography = True
         model_detector.last_rect_pts = None
-        # enqueue several times to ensure worker consumes quickly
         for _ in range(3):
             try:
                 sift_queue.put_nowait(gray_now)
