@@ -378,6 +378,10 @@ sift_worker = SIFTWorker(model_detector, sift_queue, lock, stop_event=stop_event
 pose_worker.start()
 sift_worker.start()
 
+# Add suppression state for repeated double-tap handling
+last_double_tap_ts = 0.0
+DOUBLE_TAP_COOLDOWN_MAIN = 0.7
+
 timer = time.time() - 1
 print("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
 
@@ -462,13 +466,29 @@ try:
             if not _gesture_valid(gesture_loc):
                 heartbeat_player.pause_sound()
             else:
-                heartbeat_player.play_sound()
-                zone_id = interact.push_gesture(gesture_loc)
-                camio_player.convey(zone_id, gesture_status)
+                # If a double-tap was detected by the pose detector, handle it explicitly
+                if gesture_status == 'double_tap':
+                    now = time.time()
+                    # suppress repeated processing of the same double-tap across consecutive frames
+                    if now - last_double_tap_ts > DOUBLE_TAP_COOLDOWN_MAIN:
+                        try:
+                            zone_id = interact.push_gesture(gesture_loc)
+                            camio_player.convey(zone_id, 'double_tap')
+                            last_double_tap_ts = now
+                        except Exception as e:
+                            print(f"Error handling double_tap: {e}")
+                else:
+                    heartbeat_player.play_sound()
+                    zone_id = interact.push_gesture(gesture_loc)
+                    camio_player.convey(zone_id, gesture_status)
 
         # Add status overlay
         status_text = model_detector.get_tracking_status()
         cv.putText(display_img, status_text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # Also show current gesture status for clarity while tuning
+        if gesture_status:
+            cv.putText(display_img, f"Gesture: {gesture_status}", (10, 90), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         # Add FPS
         prev_time = timer

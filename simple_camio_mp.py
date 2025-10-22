@@ -3,20 +3,51 @@ import cv2 as cv
 import mediapipe as mp
 from scipy import stats
 from google.protobuf.json_format import MessageToDict
-
+import time
+from collections import deque
 
 class PoseDetectorMP:
     def __init__(self, model):
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
-            model_complexity=0,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+            model_complexity=1,
+            min_detection_confidence=0.75,
+            min_tracking_confidence=0.75,
             max_num_hands=2
         )
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         self.image_map_color = cv.imread(model['filename'], cv.IMREAD_COLOR)
+
+        # --- Double-tap detection params / state ---
+        # keyed by hand index in current processing (0..n)
+        # each entry contains: pressing, prev_z, prev_ts, press_start, min_z, last_tap, z_history, xy_history, press_start_xy, cooldown_until
+        self._tap_state = {}
+        # Baseline thresholds (will be adapted per-frame using noise)
+        self.TAP_BASE_DELTA = 0.025     # base z delta vs baseline to start a press
+        self.TAP_NOISE_MULT = 3.0       # multiplier on median |dz| to raise threshold in noise
+        # Relaxed velocity and durations for more tolerant taps
+        self.TAP_MIN_VEL = 0.2          # min negative z velocity to start a press
+        self.TAP_RELEASE_VEL = 0.15     # min positive z velocity to consider release
+        self.TAP_MIN_DURATION = 0.05    # seconds
+        self.TAP_MAX_DURATION = 0.50    # seconds (was 0.45)
+        self.TAP_MIN_INTERVAL = 0.05    # seconds (was 0.12)
+        self.TAP_MAX_INTERVAL = 1.00    # seconds (was 0.60)
+        self.TAP_MIN_PRESS_DEPTH = 0.015  # minimal press depth needed to consider a tap
+        self.TAP_MAX_XY_DRIFT = 180.0   # allow more XY drift during a tap
+        self.TAP_MAX_RELEASE_BACK = 0.45 # fraction of press depth required to consider release complete
+        self.Z_HISTORY_LEN = 7
+        self.XY_HISTORY_LEN = 7
+        self.TAP_COOLDOWN = 0.7         # seconds to ignore further double-tap detections for this hand
+
+        # NEW: angle-based distal flexion thresholds (degrees)
+        self.ANG_HISTORY_LEN = 7
+        self.ANG_BASE_DELTA = 12.0         # min angle rise above baseline to start a press
+        self.ANG_NOISE_MULT = 3.0          # noise-adaptive margin
+        self.ANG_MIN_VEL = 120.0           # deg/s minimum rising angular velocity
+        self.ANG_RELEASE_VEL = -120.0      # deg/s negative velocity (falling) for release
+        self.ANG_MIN_PRESS_DEPTH = 10.0    # degrees (min peak flexion over baseline)
+        self.ANG_RELEASE_BACK = 0.5        # fraction of peak angle to return for release
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
         """
@@ -35,10 +66,14 @@ class PoseDetectorMP:
         index_pos = None
         movement_status = None
 
+        double_tap_emitted = False  # NEW: latch for this frame
+
         if results.multi_hand_landmarks:
             for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 orig_h, orig_w = image.shape[0], image.shape[1]
                 handedness = MessageToDict(results.multi_handedness[h])['classification'][0]['label']
+                # Use stable key based on handedness ("Left"/"Right") instead of the unstable loop index h
+                hand_key = handedness
                 coors = np.zeros((4, 3), dtype=float)
                 is_pointing = True
 
@@ -100,20 +135,177 @@ class PoseDetectorMP:
                 # fingertip 8 in normalized coords -> convert to original pixels
                 pos_x = hand_landmarks.landmark[8].x * orig_w
                 pos_y = hand_landmarks.landmark[8].y * orig_h
+                # store pixel position transformed by homography (same as before)
                 position = np.matmul(H, np.array([pos_x, pos_y, 1]))
                 if index_pos is None:
                     index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
-                if (is_pointing or (ratio_index > 0.7) and (ratio_middle < 0.95) and (ratio_ring < 0.95) and (ratio_little < 0.95)):
-                    if movement_status != "pointing":
-                        index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
-                        movement_status = "pointing"
-                    else:
-                        index_pos = np.append(index_pos,
-                                              np.array([position[0] / position[2], position[1] / position[2], 0],
-                                                       dtype=float))
-                        movement_status = "too_many"
-                elif movement_status != "pointing":
-                    movement_status = "moving"
+
+                # Guard: do not overwrite a detected double_tap with pointing/moving
+                if movement_status != 'double_tap':
+                    if (is_pointing or (ratio_index > 0.7) and (ratio_middle < 0.95) and (ratio_ring < 0.95) and (ratio_little < 0.95)):
+                        if movement_status != "pointing":
+                            index_pos = np.array([position[0] / position[2], position[1] / position[2], 0], dtype=float)
+                            movement_status = "pointing"
+                        else:
+                            index_pos = np.append(index_pos,
+                                                  np.array([position[0] / position[2], position[1] / position[2], 0],
+                                                           dtype=float))
+                            movement_status = "too_many"
+                    elif movement_status != "pointing":
+                        movement_status = "moving"
+
+                # --- Combined z- and angle-based tap detection using stable hand key ---
+                try:
+                    now = time.time()
+                    lm8_z = float(hand_landmarks.landmark[8].z)
+
+                    # Compute distal flexion angle (between 6->7 and 7->8)
+                    pip = L(6)[:2]   # index PIP
+                    dip = L(7)[:2]   # index DIP
+                    tip = L(8)[:2]   # index tip
+                    v1 = dip - pip
+                    v2 = tip - dip
+                    n1 = np.linalg.norm(v1) + 1e-6
+                    n2 = np.linalg.norm(v2) + 1e-6
+                    cosang = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
+                    angle_deg = float(np.degrees(np.arccos(cosang)))
+
+                    state = self._tap_state.get(hand_key)
+                    if state is None:
+                        state = {
+                            'pressing': False,
+                            'prev_z': lm8_z,
+                            'prev_ts': now,
+                            'press_start': 0.0,
+                            'min_z': lm8_z,
+                            'last_tap': 0.0,
+                            'z_history': deque(maxlen=self.Z_HISTORY_LEN),
+                            'xy_history': deque(maxlen=self.XY_HISTORY_LEN),
+                            'press_start_xy': (pos_x, pos_y),
+                            'cooldown_until': 0.0,
+                            'start_baseline': lm8_z,
+                            'peak_depth': 0.0,
+                            # NEW angle fields
+                            'ang_history': deque(maxlen=self.ANG_HISTORY_LEN),
+                            'prev_angle': angle_deg,
+                            'start_baseline_angle': angle_deg,
+                            'max_angle': angle_deg,
+                            'peak_angle_depth': 0.0,
+                            'press_mode': None  # 'z' or 'angle'
+                        }
+                        self._tap_state[hand_key] = state
+
+                    # Append histories
+                    state['z_history'].append(lm8_z)
+                    state['xy_history'].append((pos_x, pos_y))
+                    state['ang_history'].append(angle_deg)
+
+                    # Baselines and noise estimates
+                    z_hist = list(state['z_history'])
+                    baseline_z = np.median(z_hist) if len(z_hist) >= 3 else state['prev_z']
+                    dz_abs = np.abs(np.diff(z_hist)) if len(z_hist) >= 2 else np.array([0.0])
+                    noise_z = float(np.median(dz_abs)) if dz_abs.size > 0 else 0.0
+                    dz_press = max(self.TAP_BASE_DELTA, self.TAP_NOISE_MULT * noise_z)
+
+                    ang_hist = list(state['ang_history'])
+                    baseline_ang = np.median(ang_hist) if len(ang_hist) >= 3 else state['prev_angle']
+                    dang_abs = np.abs(np.diff(ang_hist)) if len(ang_hist) >= 2 else np.array([0.0])
+                    noise_ang = float(np.median(dang_abs)) if dang_abs.size > 0 else 0.0
+                    dang_press = max(self.ANG_BASE_DELTA, self.ANG_NOISE_MULT * noise_ang)
+
+                    # Velocities
+                    dt = max(1e-3, now - state['prev_ts'])
+                    vz = (lm8_z - state['prev_z']) / dt
+                    vang = (angle_deg - state['prev_angle']) / dt  # deg/s
+
+                    # Start press if z OR angle triggers (while pointing and not in cooldown)
+                    if (not state['pressing']) and is_pointing and (now >= state.get('cooldown_until', 0.0)):
+                        z_press = (baseline_z - lm8_z > dz_press) and (vz <= -self.TAP_MIN_VEL)
+                        ang_press = (angle_deg - baseline_ang > dang_press) and (vang >= self.ANG_MIN_VEL)
+                        if z_press or ang_press:
+                            state['pressing'] = True
+                            state['press_start'] = now
+                            state['press_start_xy'] = (pos_x, pos_y)
+                            # Z mode init
+                            state['min_z'] = lm8_z
+                            state['start_baseline'] = baseline_z
+                            state['peak_depth'] = max(0.0, baseline_z - lm8_z)
+                            # ANG mode init
+                            state['start_baseline_angle'] = baseline_ang
+                            state['max_angle'] = angle_deg
+                            state['peak_angle_depth'] = max(0.0, angle_deg - baseline_ang)
+                            state['press_mode'] = 'angle' if ang_press and (not z_press) else ('z' if z_press and (not ang_press) else 'either')
+
+                    # Track press and check release
+                    if state['pressing']:
+                        # Update z peak
+                        if lm8_z < state['min_z']:
+                            state['min_z'] = lm8_z
+                        state['peak_depth'] = max(state['peak_depth'], state['start_baseline'] - state['min_z'])
+
+                        # Update angle peak
+                        if angle_deg > state['max_angle']:
+                            state['max_angle'] = angle_deg
+                        state['peak_angle_depth'] = max(state['peak_angle_depth'], state['max_angle'] - state['start_baseline_angle'])
+
+                        # Release conditions
+                        depth_z = max(0.0, state['peak_depth'])
+                        back_z = lm8_z - state['min_z']
+                        enough_back_z = (depth_z >= self.TAP_MIN_PRESS_DEPTH) and (back_z >= self.TAP_MAX_RELEASE_BACK * depth_z)
+                        velocity_release_z = (vz >= self.TAP_RELEASE_VEL) and ((now - state['press_start']) >= self.TAP_MIN_DURATION)
+
+                        depth_ang = max(0.0, state['peak_angle_depth'])
+                        back_ang = state['max_angle'] - angle_deg
+                        enough_back_ang = (depth_ang >= self.ANG_MIN_PRESS_DEPTH) and (back_ang >= self.ANG_RELEASE_BACK * depth_ang)
+                        velocity_release_ang = (vang <= self.ANG_RELEASE_VEL) and ((now - state['press_start']) >= self.TAP_MIN_DURATION)
+
+                        too_long = (now - state['press_start'] > self.TAP_MAX_DURATION)
+
+                        if enough_back_z or velocity_release_z or enough_back_ang or velocity_release_ang or too_long:
+                            press_duration = now - state['press_start']
+                            sx, sy = state['press_start_xy']
+                            xy_drift = float(np.hypot(pos_x - sx, pos_y - sy))
+
+                            # Accept a tap if either depth passes threshold
+                            valid_tap = (
+                                (press_duration >= self.TAP_MIN_DURATION) and
+                                (xy_drift <= self.TAP_MAX_XY_DRIFT) and
+                                ((depth_z >= self.TAP_MIN_PRESS_DEPTH) or (depth_ang >= self.ANG_MIN_PRESS_DEPTH))
+                            )
+
+                            if valid_tap:
+                                print(f"Tap detected: duration={press_duration:.3f}s, depth={depth_z:.4f}, angleDepth={depth_ang:.1f}, drift={xy_drift:.1f}")
+                                last_tap = state.get('last_tap', 0.0)
+                                gap = now - last_tap if last_tap > 0.0 else 1e9
+                                if (last_tap > 0.0) and (self.TAP_MIN_INTERVAL <= gap <= self.TAP_MAX_INTERVAL) and (now >= state.get('cooldown_until', 0.0)):
+                                    movement_status = 'double_tap'
+                                    print(f"Double tap detected! Interval={gap:.3f}s")
+                                    double_tap_emitted = True
+                                    if draw and img_out is not None:
+                                        cv.putText(img_out, "DOUBLE TAP", (int(pos_x), int(pos_y) - 10),
+                                                   cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                                    state['pressing'] = False
+                                    state['last_tap'] = 0.0
+                                    state['cooldown_until'] = now + self.TAP_COOLDOWN
+                                    state['z_history'].clear()
+                                    state['xy_history'].clear()
+                                    state['ang_history'].clear()
+                                else:
+                                    state['last_tap'] = now
+                                    state['pressing'] = False
+                            else:
+                                state['pressing'] = False
+
+                    # Book-keeping
+                    state['prev_z'] = lm8_z
+                    state['prev_ts'] = now
+                    state['prev_angle'] = angle_deg
+
+                except Exception:
+                    pass
+
+                if double_tap_emitted:
+                    break
 
         # Normalize index_pos: always return either None or a 1D numpy array of length 3 [x,y,z].
         if index_pos is None:
