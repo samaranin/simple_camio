@@ -16,34 +16,6 @@ from config import MediaPipeConfig, TapDetectionConfig
 
 logger = logging.getLogger(__name__)
 
-# --- Inject defaults for enhanced config fields if missing ---
-def _ensure_enhanced_config_defaults():
-    defaults = {
-        'PLANE_BASE_DELTA': 0.010,
-        'PLANE_NOISE_MULT': 4.0,
-        'PLANE_MIN_PRESS_DEPTH': 0.008,
-        'PLANE_RELEASE_BACK': 0.45,
-        'ZREL_BASE_DELTA': 0.010,
-        'ZREL_NOISE_MULT': 4.0,
-        'ZREL_MIN_PRESS_DEPTH': 0.010,
-        'EWMA_ALPHA': 0.35,
-        'STABLE_XY_VEL_MAX': 50.0,
-        'STABLE_ROT_MAX': 0.25,
-        'MIN_HAND_SCORE': 0.65,
-        'JITTER_MAX_PX': 3.0,
-        'RAY_MIN_IN_VEL': 0.10,
-        'INDEX_STRONG_MIN': 0.78,
-        'OTHERS_STRONG_MAX': 0.92,
-        'CLS_WEIGHTS': np.array([2.0, 1.2, 1.0, -0.8, -0.9, -0.4, 0.6], dtype=float),
-        'CLS_BIAS': -2.0,
-        'CLS_MIN_PROB': 0.65,
-    }
-    for k, v in defaults.items():
-        if not hasattr(TapDetectionConfig, k):
-            setattr(TapDetectionConfig, k, v)
-            logger.debug(f"TapDetectionConfig: defaulted {k}={v}")
-
-_ensure_enhanced_config_defaults()
 
 class PoseDetectorMP:
     """
