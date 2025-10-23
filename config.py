@@ -74,7 +74,7 @@ class TapDetectionConfig:
     TAP_MAX_DURATION = 0.50         # Maximum tap duration (seconds)
     TAP_MIN_INTERVAL = 0.05         # Minimum interval between taps (seconds)
     TAP_MAX_INTERVAL = 1.00         # Maximum interval between taps (seconds)
-    TAP_MIN_PRESS_DEPTH = 0.015     # Minimal press depth needed to consider a tap
+    TAP_MIN_PRESS_DEPTH = 0.010     # Minimal press depth needed to consider a tap
     TAP_MAX_XY_DRIFT = 180.0        # Maximum XY drift during a tap
     TAP_MAX_RELEASE_BACK = 0.45     # Fraction of press depth required for release
 
