@@ -16,6 +16,34 @@ from config import MediaPipeConfig, TapDetectionConfig
 
 logger = logging.getLogger(__name__)
 
+# --- Inject defaults for enhanced config fields if missing ---
+def _ensure_enhanced_config_defaults():
+    defaults = {
+        'PLANE_BASE_DELTA': 0.010,
+        'PLANE_NOISE_MULT': 4.0,
+        'PLANE_MIN_PRESS_DEPTH': 0.008,
+        'PLANE_RELEASE_BACK': 0.45,
+        'ZREL_BASE_DELTA': 0.010,
+        'ZREL_NOISE_MULT': 4.0,
+        'ZREL_MIN_PRESS_DEPTH': 0.010,
+        'EWMA_ALPHA': 0.35,
+        'STABLE_XY_VEL_MAX': 50.0,
+        'STABLE_ROT_MAX': 0.25,
+        'MIN_HAND_SCORE': 0.65,
+        'JITTER_MAX_PX': 3.0,
+        'RAY_MIN_IN_VEL': 0.10,
+        'INDEX_STRONG_MIN': 0.78,
+        'OTHERS_STRONG_MAX': 0.92,
+        'CLS_WEIGHTS': np.array([2.0, 1.2, 1.0, -0.8, -0.9, -0.4, 0.6], dtype=float),
+        'CLS_BIAS': -2.0,
+        'CLS_MIN_PROB': 0.65,
+    }
+    for k, v in defaults.items():
+        if not hasattr(TapDetectionConfig, k):
+            setattr(TapDetectionConfig, k, v)
+            logger.debug(f"TapDetectionConfig: defaulted {k}={v}")
+
+_ensure_enhanced_config_defaults()
 
 class PoseDetectorMP:
     """
@@ -552,32 +580,6 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
     flexion-angle logic. Does not modify base class methods.
     """
 
-    # Reasonable defaults if not present in TapDetectionConfig
-    PLANE_BASE_DELTA      = getattr(TapDetectionConfig, 'PLANE_BASE_DELTA', 0.010)
-    PLANE_NOISE_MULT      = getattr(TapDetectionConfig, 'PLANE_NOISE_MULT', 4.0)
-    PLANE_MIN_PRESS_DEPTH = getattr(TapDetectionConfig, 'PLANE_MIN_PRESS_DEPTH', 0.008)
-    PLANE_RELEASE_BACK    = getattr(TapDetectionConfig, 'PLANE_RELEASE_BACK', 0.45)
-
-    ZREL_BASE_DELTA       = getattr(TapDetectionConfig, 'ZREL_BASE_DELTA', 0.010)
-    ZREL_NOISE_MULT       = getattr(TapDetectionConfig, 'ZREL_NOISE_MULT', 4.0)
-    ZREL_MIN_PRESS_DEPTH  = getattr(TapDetectionConfig, 'ZREL_MIN_PRESS_DEPTH', 0.010)
-
-    EWMA_ALPHA            = getattr(TapDetectionConfig, 'EWMA_ALPHA', 0.35)
-    STABLE_XY_VEL_MAX     = getattr(TapDetectionConfig, 'STABLE_XY_VEL_MAX', 50.0)  # px/s
-    STABLE_ROT_MAX        = getattr(TapDetectionConfig, 'STABLE_ROT_MAX', 0.25)     # rad/s
-    MIN_HAND_SCORE        = getattr(TapDetectionConfig, 'MIN_HAND_SCORE', 0.65)
-    JITTER_MAX_PX         = getattr(TapDetectionConfig, 'JITTER_MAX_PX', 3.0)
-    RAY_MIN_IN_VEL        = getattr(TapDetectionConfig, 'RAY_MIN_IN_VEL', 0.10)     # norm units/s
-
-    INDEX_STRONG_MIN      = getattr(TapDetectionConfig, 'INDEX_STRONG_MIN', 0.78)
-    OTHERS_STRONG_MAX     = getattr(TapDetectionConfig, 'OTHERS_STRONG_MAX', 0.92)
-
-    # Tiny classifier weights (logistic); can be tuned
-    CLS_WEIGHTS           = getattr(TapDetectionConfig, 'CLS_WEIGHTS',
-                                    np.array([ 2.0,  1.2,  1.0, -0.8, -0.9, -0.4, 0.6 ], dtype=float))
-    CLS_BIAS              = getattr(TapDetectionConfig, 'CLS_BIAS', -2.0)
-    CLS_MIN_PROB          = getattr(TapDetectionConfig, 'CLS_MIN_PROB', 0.65)
-
     def __init__(self, model):
         super().__init__(model)
         # Extra per-hand state
@@ -715,8 +717,11 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
     # ---------- Enhanced tap detection ----------
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
-        # First, run the base detector to preserve existing working behavior.
-        base_index_pos, base_status, base_img = super().detect(image, H, _, processing_scale, draw)
+        # Use cached base outputs when used in combination wrapper to avoid double-processing
+        if getattr(self, "_skip_super", False) and hasattr(self, "_base_cache"):
+            base_index_pos, base_status, base_img = self._base_cache
+        else:
+            base_index_pos, base_status, base_img = super().detect(image, H, _, processing_scale, draw)
 
         # Now run the enhanced pipeline and fuse it with base outputs.
         # Downscale image for faster processing
@@ -734,7 +739,6 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
 
         if results.multi_hand_landmarks:
             orig_h, orig_w = image.shape[0], image.shape[1]
-
             for h_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness_msg = MessageToDict(results.multi_handedness[h_idx])['classification'][0]
                 handedness = handedness_msg.get('label', 'Unknown')
@@ -857,15 +861,8 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                         )
 
                         # Tiny classifier features
-                        feats = np.array([
-                            st['peak_zrel_depth'],
-                            st['peak_plane_depth'],
-                            st['peak_ang_depth'],
-                            drift,
-                            abs(vzrel),
-                            abs(vplane),
-                            duration
-                        ], dtype=float)
+                        feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
+                                          drift, abs(vzrel), abs(vplane), duration], dtype=float)
                         prob = self._tiny_cls_prob(feats)
                         valid = valid_rule and (prob >= self.CLS_MIN_PROB)
 
@@ -894,14 +891,13 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 st['prev_ang'] = st['ema_ang']
                 st['prev_plane'] = st['ema_plane']
 
-                # Movement status fallback
                 if movement_status != 'double_tap':
                     movement_status = 'pointing' if is_pointing else 'moving'
 
         # Normalize index position to 3-vector
         normalized = self._normalize_index_position(index_pos)
 
-        # --------- Fuse enhanced outputs with base outputs ----------
+        # Fuse enhanced outputs with base outputs
         enhanced_status = movement_status
         final_pos = normalized if normalized is not None else base_index_pos
         if (base_status == 'double_tap') or (enhanced_status == 'double_tap'):
@@ -930,3 +926,18 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         others_max = max(r_mid, r_rng, r_ltl)
         return (r_idx >= self.INDEX_STRONG_MIN) and (others_max <= self.OTHERS_STRONG_MAX)
 
+# --- Combination wrapper to run base + enhanced and fuse outputs ---
+class CombinedPoseDetector:
+    def __init__(self, model):
+        self.base = PoseDetectorMP(model)
+        self.enh = PoseDetectorMPEnhanced(model)
+        # Tell enhanced to use cached base outputs instead of calling super()
+        self.enh._skip_super = True
+        # Propagate image (for downstream tools that may inspect it)
+        self.image_map_color = self.base.image_map_color
+
+    def detect(self, image, H, _, processing_scale=0.5, draw=False):
+        base_index_pos, base_status, base_img = self.base.detect(image, H, _, processing_scale, draw)
+        # Cache base outputs for the enhanced detector
+        self.enh._base_cache = (base_index_pos, base_status, base_img)
+        return self.enh.detect(image, H, _, processing_scale, draw)

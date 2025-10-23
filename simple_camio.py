@@ -19,7 +19,7 @@ from config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetecti
 from utils import select_camera_port, load_map_parameters, draw_rectangle_on_image, draw_rectangle_from_points, is_gesture_valid
 from audio import AmbientSoundPlayer, ZoneAudioPlayer
 from gesture_detection import GestureDetector, MovementMedianFilter
-from pose_detector import PoseDetectorMPEnhanced
+from pose_detector import CombinedPoseDetector
 from sift_detector import SIFTModelDetectorMP
 from interaction_policy import InteractionPolicy2D
 from workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
@@ -53,7 +53,7 @@ def initialize_system(model_path):
     # Initialize components based on model type
     if model["modelType"] == "sift_2d_mediapipe":
         model_detector = SIFTModelDetectorMP(model)
-        pose_detector = PoseDetectorMPEnhanced(model)
+        pose_detector = CombinedPoseDetector(model)
         gesture_detector = GestureDetector()
         motion_filter = MovementMedianFilter()
         interact = InteractionPolicy2D(model)
