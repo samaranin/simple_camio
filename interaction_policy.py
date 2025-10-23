@@ -7,7 +7,6 @@ the user is interacting with based on their finger position.
 
 import cv2 as cv
 import numpy as np
-from scipy import stats
 import logging
 from config import InteractionConfig
 from utils import color_to_index
@@ -42,6 +41,16 @@ class InteractionPolicy2D:
 
         logger.info(f"Initialized interaction policy with Z threshold: {self.Z_THRESHOLD} cm")
 
+    def _mode_int(self, arr):
+        """
+        Fast mode for small integer arrays; ignores values < 0 (e.g., -1 placeholders).
+        """
+        valid = arr[arr >= 0]
+        if valid.size == 0:
+            return -1
+        vals, counts = np.unique(valid, return_counts=True)
+        return int(vals[np.argmax(counts)])
+
     def push_gesture(self, position):
         """
         Process a gesture position and return the active zone ID.
@@ -68,10 +77,8 @@ class InteractionPolicy2D:
         self.zone_filter[self.zone_filter_cnt] = zone_idx
         self.zone_filter_cnt = (self.zone_filter_cnt + 1) % self.ZONE_FILTER_SIZE
 
-        # Get mode (most common zone in buffer)
-        zone = stats.mode(self.zone_filter, keepdims=False).mode
-        if isinstance(zone, np.ndarray):
-            zone = zone[0]
+        # Get mode (most common zone in buffer) without SciPy
+        zone = self._mode_int(self.zone_filter)
 
         # Check Z-threshold for touch detection
         if np.abs(position[2]) < self.Z_THRESHOLD:
@@ -99,4 +106,3 @@ class InteractionPolicy2D:
         else:
             logger.debug(f"Point ({x}, {y}) out of bounds")
             return [0, 0, 0]
-

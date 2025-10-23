@@ -45,11 +45,29 @@ class SIFTModelDetectorMP:
             nlevels=SIFTConfig.ORB_N_LEVELS
         )
 
+        # Reusable matchers (avoid per-call allocations)
+        try:
+            FLANN_INDEX_KDTREE = 1
+            self._flann_params_main = dict(algorithm=FLANN_INDEX_KDTREE, trees=SIFTConfig.FLANN_TREES)
+            self._search_params_main = dict(checks=SIFTConfig.FLANN_CHECKS)
+            self.flann_sift = cv.FlannBasedMatcher(self._flann_params_main, self._search_params_main)
+            # Quick-validation matcher with lighter params
+            self._flann_params_quick = dict(algorithm=FLANN_INDEX_KDTREE, trees=6)
+            self._search_params_quick = dict(checks=50)
+            self.flann_sift_quick = cv.FlannBasedMatcher(self._flann_params_quick, self._search_params_quick)
+        except Exception:
+            self.flann_sift = None
+            self.flann_sift_quick = None
+        self.bf_orb = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=False)
+
         # Extract template features
         self._extract_template_features(img_object)
 
-        # Store template shape for corner computation
+        # Store template shape and precompute corners
         self.template_shape = img_object.shape[:2]  # (h, w)
+        h_t, w_t = self.template_shape
+        self.obj_corners = np.array([[0, 0], [w_t, 0], [w_t, h_t], [0, h_t]],
+                                    dtype=np.float32).reshape(-1, 1, 2)
 
         # Tracking state
         self.requires_homography = True
@@ -163,9 +181,7 @@ class SIFTModelDetectorMP:
 
     def _validate_tracking(self, frame):
         """Validate current homography quality using feature matching."""
-        keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(
-            frame, None
-        )
+        keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(frame, None)
 
         if descriptors_scene is None or len(keypoints_scene) < 4:
             self.requires_homography = True
@@ -173,12 +189,13 @@ class SIFTModelDetectorMP:
             return
 
         try:
-            # FLANN matcher
-            FLANN_INDEX_KDTREE = 1
-            index_params = dict(algorithm=FLANN_INDEX_KDTREE,
-                              trees=SIFTConfig.FLANN_TREES)
-            search_params = dict(checks=SIFTConfig.FLANN_CHECKS)
-            matcher = cv.FlannBasedMatcher(index_params, search_params)
+            # Reuse FLANN matcher
+            if self.flann_sift is None:
+                FLANN_INDEX_KDTREE = 1
+                matcher = cv.FlannBasedMatcher(dict(algorithm=FLANN_INDEX_KDTREE, trees=SIFTConfig.FLANN_TREES),
+                                               dict(checks=SIFTConfig.FLANN_CHECKS))
+            else:
+                matcher = self.flann_sift
             knn_matches = matcher.knnMatch(self.descriptors_sift, descriptors_scene, k=2)
 
             # Lowe's ratio test
@@ -211,19 +228,18 @@ class SIFTModelDetectorMP:
 
     def _match_sift(self, frame):
         """SIFT-based feature matching."""
-        keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(
-            frame, None
-        )
+        keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(frame, None)
 
         if descriptors_scene is None or len(keypoints_scene) < 4:
             return False, None
 
-        # FLANN matcher
-        FLANN_INDEX_KDTREE = 1
-        index_params = dict(algorithm=FLANN_INDEX_KDTREE,
-                          trees=SIFTConfig.FLANN_TREES)
-        search_params = dict(checks=SIFTConfig.FLANN_CHECKS)
-        matcher = cv.FlannBasedMatcher(index_params, search_params)
+        # Reuse FLANN matcher
+        if self.flann_sift is None:
+            FLANN_INDEX_KDTREE = 1
+            matcher = cv.FlannBasedMatcher(dict(algorithm=FLANN_INDEX_KDTREE, trees=SIFTConfig.FLANN_TREES),
+                                           dict(checks=SIFTConfig.FLANN_CHECKS))
+        else:
+            matcher = self.flann_sift
         knn_matches = matcher.knnMatch(self.descriptors_sift, descriptors_scene, k=2)
 
         # Lowe's ratio test
@@ -245,15 +261,13 @@ class SIFTModelDetectorMP:
 
     def _match_orb(self, frame):
         """ORB-based feature matching as fallback."""
-        keypoints_scene, descriptors_scene = self.orb_detector.detectAndCompute(
-            frame, None
-        )
+        keypoints_scene, descriptors_scene = self.orb_detector.detectAndCompute(frame, None)
 
         if descriptors_scene is None or len(keypoints_scene) < 4:
             return False, None
 
-        # BFMatcher for binary descriptors
-        matcher = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=False)
+        # Reuse BF matcher
+        matcher = self.bf_orb
         matches = matcher.knnMatch(self.descriptors_orb, descriptors_scene, k=2)
 
         # Ratio test
@@ -312,32 +326,23 @@ class SIFTModelDetectorMP:
         self.last_inlier_count = inlier_count
         self.requires_homography = False
         self.tracking_quality_history.append(inlier_count)
-
         if len(self.tracking_quality_history) > 10:
             self.tracking_quality_history.pop(0)
 
-        # Compute projected rectangle corners
-        h_t, w_t = self.template_shape
-        obj_corners = np.array([
-            [0, 0], [w_t, 0], [w_t, h_t], [0, h_t]
-        ], dtype=np.float32).reshape(-1, 1, 2)
-
+        # Compute projected rectangle corners (reuse precomputed template corners)
         try:
             H_inv = np.linalg.inv(self.H)
-            pts = cv.perspectiveTransform(obj_corners, H_inv)
+            pts = cv.perspectiveTransform(self.obj_corners, H_inv)
             self.last_rect_pts = pts
         except Exception as e:
             logger.error(f"Could not compute projected rectangle: {e}")
             self.last_rect_pts = None
 
-        # Flag update for visual feedback
         self.homography_updated = True
-
         if self.debug:
             logger.info(f"Homography locked using {method_name}")
 
-    def quick_validate_position(self, scene_gray, min_matches=None,
-                               position_threshold=None):
+    def quick_validate_position(self, scene_gray, min_matches=None, position_threshold=None):
         """
         Quick validation by checking if template position has changed.
 
@@ -370,11 +375,12 @@ class SIFTModelDetectorMP:
             return False
 
         try:
-            # Match and compute fresh homography
-            FLANN_INDEX_KDTREE = 1
-            index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=6)
-            search_params = dict(checks=50)
-            matcher = cv.FlannBasedMatcher(index_params, search_params)
+            # Reuse quick FLANN matcher
+            matcher = self.flann_sift_quick if self.flann_sift_quick is not None else self.flann_sift
+            if matcher is None:
+                FLANN_INDEX_KDTREE = 1
+                matcher = cv.FlannBasedMatcher(dict(algorithm=FLANN_INDEX_KDTREE, trees=6),
+                                               dict(checks=50))
             knn_matches = matcher.knnMatch(self.descriptors_sift, descriptors_scene, k=2)
 
             good_matches = []
@@ -415,14 +421,10 @@ class SIFTModelDetectorMP:
                 self.last_rect_pts = None
                 return False
 
-            # Compare projected corners
-            h_t, w_t = self.template_shape
-            obj_corners = np.array([
-                [0, 0], [w_t, 0], [w_t, h_t], [0, h_t]
-            ], dtype=np.float32).reshape(-1, 1, 2)
-
+            # Compare projected corners (reuse precomputed)
+            h_t, w_t = self.template_shape  # kept if needed elsewhere
             H_test_inv = np.linalg.inv(H_test)
-            new_pts = cv.perspectiveTransform(obj_corners, H_test_inv)
+            new_pts = cv.perspectiveTransform(self.obj_corners, H_test_inv)
 
             old_pts = self.last_rect_pts.reshape(-1, 2)
             new_pts_flat = new_pts.reshape(-1, 2)
