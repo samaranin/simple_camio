@@ -104,7 +104,7 @@ class PoseDetectorMP:
         else:
             small = image
 
-        # Convert to RGB for MediaPipe
+        # Convert to RGB for MediaPipe (model expects RGB)
         small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
         results = self.hands.process(small_rgb)
 
@@ -132,12 +132,13 @@ class PoseDetectorMP:
                 pos_x, pos_y, position = self._get_finger_position(
                     hand_landmarks, 8, orig_w, orig_h, H
                 )
-
+                # position is homogeneous: [x', y', w'] = H * [x, y, 1]
+                # Normalize by w' to get metric coordinates in the map/model plane.
                 if index_pos is None:
                     index_pos = np.array([
-                        position[0] / position[2],
-                        position[1] / position[2],
-                        0
+                        position[0] / position[2],  # x' / w'
+                        position[1] / position[2],  # y' / w'
+                        0                            # z reserved; not used in current pipeline
                     ], dtype=float)
 
                 # Update movement status based on pointing gesture
@@ -159,7 +160,6 @@ class PoseDetectorMP:
 
         # Normalize index position to always return proper format
         normalized = self._normalize_index_position(index_pos)
-
         return normalized, movement_status, img_out
 
     def _detect_pointing_gesture(self, hand_landmarks, width, height):
@@ -175,11 +175,11 @@ class PoseDetectorMP:
             bool: True if pointing gesture detected
         """
         def L(i):
-            """Get landmark position in pixels."""
+            """Get landmark position in pixels [x_px, y_px, z_rel]."""
             lm = hand_landmarks.landmark[i]
             return np.array([lm.x * width, lm.y * height, lm.z], dtype=float)
 
-        # Calculate finger extension ratios
+        # Calculate finger extension ratios (1.0 ~ straight; smaller ~ curled)
         ratios = {}
         finger_indices = {
             'thumb': [1, 2, 3, 4],
@@ -188,29 +188,28 @@ class PoseDetectorMP:
             'ring': [13, 14, 15, 16],
             'little': [17, 18, 19, 20]
         }
-
         for finger, indices in finger_indices.items():
             coors = np.array([L(idx) for idx in indices])
-            ratios[finger] = self.ratio(coors)
+            ratios[finger] = self.ratio(coors)  # ratio = base->tip straight length / sum of bones
 
-        # Check if other fingers are curled (blocking index extension line)
-        a = L(5)  # Index MCP
-        ab = L(8) - L(5)  # Index vector
+        # Check if other fingers intrude along the index ray (block pointing)
+        a = L(5)               # Index MCP
+        ab = L(8) - L(5)       # Index direction vector (to tip)
         is_pointing = True
-
         for finger in ['middle', 'ring', 'little']:
             indices = finger_indices[finger]
             for idx in indices:
                 ap = L(idx) - a
+                # Project ap onto ab via dot(ap,ab)/dot(ab,ab). If > 0.5, joint lies beyond
+                # mid-index ray, likely not a clean pointing pose.
                 if np.dot(ap, ab) / np.dot(ab, ab) > 0.5:
                     is_pointing = False
 
-        # Alternative check: index extended, others curled
+        # Alternative check: index much straighter than other fingers
         overall = ratios['index'] - (
             (ratios['middle'] + ratios['ring'] + ratios['little']) / 3
         )
         is_pointing = is_pointing or overall > 0.1
-
         return is_pointing
 
     def _get_finger_position(self, hand_landmarks, landmark_idx, width, height, H):
@@ -230,6 +229,8 @@ class PoseDetectorMP:
         lm = hand_landmarks.landmark[landmark_idx]
         pos_x = lm.x * width
         pos_y = lm.y * height
+        # Homography (3x3) maps image pixel [x, y, 1] to map plane [x', y', w'].
+        # The caller must divide by w' to get in-plane coordinates.
         position = np.matmul(H, np.array([pos_x, pos_y, 1]))
         return pos_x, pos_y, position
 
@@ -241,7 +242,7 @@ class PoseDetectorMP:
         Returns:
             str: Updated movement status
         """
-        # Calculate finger ratios
+        # Calculate finger extension ratios to judge "pointing" vs "moving"
         def L(i):
             lm = hand_landmarks.landmark[i]
             return np.array([lm.x, lm.y, lm.z], dtype=float)
@@ -258,14 +259,14 @@ class PoseDetectorMP:
         little_coors = np.array([L(i) for i in [17, 18, 19, 20]])
         ratio_little = self.ratio(little_coors)
 
-        # Check for pointing configuration
+        # Heuristic: index straight but others not fully straight -> pointing
         if (is_pointing or
             (ratio_index > 0.7 and ratio_middle < 0.95 and
              ratio_ring < 0.95 and ratio_little < 0.95)):
             if current_status != "pointing":
                 return "pointing"
             else:
-                # Multiple hands pointing
+                # Multiple hands pointing (disambiguation flag)
                 return "too_many"
         elif current_status != "pointing":
             return "moving"
@@ -284,37 +285,37 @@ class PoseDetectorMP:
             now = time.time()
             lm8_z = float(hand_landmarks.landmark[8].z)
 
-            # Compute distal flexion angle
+            # Compute distal flexion angle at index DIP
             angle_deg = self._compute_finger_flexion_angle(hand_landmarks, width, height)
 
             # Get or create tap state for this hand
             state = self._get_tap_state(hand_key, lm8_z, angle_deg, pos_x, pos_y, now)
 
-            # Update histories
+            # Update histories used for robust baselines
             state['z_history'].append(lm8_z)
             state['xy_history'].append((pos_x, pos_y))
             state['ang_history'].append(angle_deg)
 
-            # Calculate baselines and noise
+            # Calculate baselines (median) and noise (median of |diff|)
             baseline_z, noise_z, dz_press = self._calculate_z_baseline(state)
             baseline_ang, noise_ang, dang_press = self._calculate_angle_baseline(state)
 
-            # Calculate velocities
+            # Velocities (per second); dt protected from 0 by 1e-3
             dt = max(1e-3, now - state['prev_ts'])
-            vz = (lm8_z - state['prev_z']) / dt
-            vang = (angle_deg - state['prev_angle']) / dt
+            vz = (lm8_z - state['prev_z']) / dt         # inward is negative in MP z
+            vang = (angle_deg - state['prev_angle']) / dt  # positive when closing
 
-            # Try to start a press
+            # Try to start a press if either Z or angle triggers activate
             if self._try_start_press(state, is_pointing, now, baseline_z, lm8_z,
                                     dz_press, vz, baseline_ang, angle_deg,
                                     dang_press, vang, pos_x, pos_y):
                 pass  # Press started
 
-            # Check for tap completion
+            # Check for tap completion (single/double)
             double_tap = self._check_tap_release(state, now, lm8_z, vz, angle_deg,
                                                  vang, pos_x, pos_y, draw, img_out)
 
-            # Update state
+            # Update state for next frame
             state['prev_z'] = lm8_z
             state['prev_ts'] = now
             state['prev_angle'] = angle_deg
@@ -335,13 +336,13 @@ class PoseDetectorMP:
         dip = L(7)  # Index DIP
         tip = L(8)  # Index tip
 
-        v1 = dip - pip
-        v2 = tip - dip
-        n1 = np.linalg.norm(v1) + 1e-6
-        n2 = np.linalg.norm(v2) + 1e-6
+        v1 = dip - pip                     # bone vector PIP->DIP
+        v2 = tip - dip                     # bone vector DIP->TIP
+        n1 = np.linalg.norm(v1) + 1e-6     # |v1|; epsilon avoids div-by-zero
+        n2 = np.linalg.norm(v2) + 1e-6     # |v2|
+        # cos(theta) = (v1·v2)/(|v1||v2|); clamp to [-1,1] for numerical safety
         cosang = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
-        angle_deg = float(np.degrees(np.arccos(cosang)))
-
+        angle_deg = float(np.degrees(np.arccos(cosang)))  # radians->degrees
         return angle_deg
 
     def _get_tap_state(self, hand_key, lm8_z, angle_deg, pos_x, pos_y, now):
@@ -372,10 +373,10 @@ class PoseDetectorMP:
     def _calculate_z_baseline(self, state):
         """Calculate Z-depth baseline and noise-adaptive threshold."""
         z_hist = list(state['z_history'])
-        baseline_z = np.median(z_hist) if len(z_hist) >= 3 else state['prev_z']
-        dz_abs = np.abs(np.diff(z_hist)) if len(z_hist) >= 2 else np.array([0.0])
-        noise_z = float(np.median(dz_abs)) if dz_abs.size > 0 else 0.0
-        dz_press = max(self.TAP_BASE_DELTA, self.TAP_NOISE_MULT * noise_z)
+        baseline_z = np.median(z_hist) if len(z_hist) >= 3 else state['prev_z']  # robust center
+        dz_abs = np.abs(np.diff(z_hist)) if len(z_hist) >= 2 else np.array([0.0])  # frame-to-frame jitter
+        noise_z = float(np.median(dz_abs)) if dz_abs.size > 0 else 0.0            # robust noise estimate
+        dz_press = max(self.TAP_BASE_DELTA, self.TAP_NOISE_MULT * noise_z)        # adaptive margin
         return baseline_z, noise_z, dz_press
 
     def _calculate_angle_baseline(self, state):
@@ -392,7 +393,9 @@ class PoseDetectorMP:
                         pos_x, pos_y):
         """Try to start a tap press based on Z or angle triggers."""
         if (not state['pressing']) and is_pointing and (now >= state.get('cooldown_until', 0.0)):
+            # Z trigger: tip moved inward beyond baseline by dz_press and with sufficient inward speed
             z_press = (baseline_z - lm8_z > dz_press) and (vz <= -self.TAP_MIN_VEL)
+            # Angle trigger: distal joint closing beyond baseline by dang_press and fast enough
             ang_press = (angle_deg - baseline_ang > dang_press) and (vang >= self.ANG_MIN_VEL)
 
             if z_press or ang_press:
@@ -422,27 +425,27 @@ class PoseDetectorMP:
         if not state['pressing']:
             return False
 
-        # Update peak values
+        # Update peak values (deepest press and max angle)
         if lm8_z < state['min_z']:
             state['min_z'] = lm8_z
         state['peak_depth'] = max(state['peak_depth'],
-                                 state['start_baseline'] - state['min_z'])
+                                 state['start_baseline'] - state['min_z'])  # depth from baseline
 
         if angle_deg > state['max_angle']:
             state['max_angle'] = angle_deg
         state['peak_angle_depth'] = max(state['peak_angle_depth'],
                                        state['max_angle'] - state['start_baseline_angle'])
 
-        # Check release conditions
+        # Release when sufficient "back-out" or velocity reversal or timeout
         depth_z = max(0.0, state['peak_depth'])
-        back_z = lm8_z - state['min_z']
+        back_z = lm8_z - state['min_z']  # how much tip returned from deepest point
         enough_back_z = ((depth_z >= self.TAP_MIN_PRESS_DEPTH) and
                         (back_z >= self.TAP_MAX_RELEASE_BACK * depth_z))
         velocity_release_z = ((vz >= self.TAP_RELEASE_VEL) and
                              ((now - state['press_start']) >= self.TAP_MIN_DURATION))
 
         depth_ang = max(0.0, state['peak_angle_depth'])
-        back_ang = state['max_angle'] - angle_deg
+        back_ang = state['max_angle'] - angle_deg  # angle opened back
         enough_back_ang = ((depth_ang >= self.ANG_MIN_PRESS_DEPTH) and
                           (back_ang >= self.ANG_RELEASE_BACK * depth_ang))
         velocity_release_ang = ((vang <= self.ANG_RELEASE_VEL) and
@@ -455,9 +458,9 @@ class PoseDetectorMP:
 
             press_duration = now - state['press_start']
             sx, sy = state['press_start_xy']
-            xy_drift = float(np.hypot(pos_x - sx, pos_y - sy))
+            xy_drift = float(np.hypot(pos_x - sx, pos_y - sy))  # Euclidean drift during press
 
-            # Validate tap
+            # Validate tap with duration, drift, and sufficient excursion in depth or angle
             valid_tap = ((press_duration >= self.TAP_MIN_DURATION) and
                         (xy_drift <= self.TAP_MAX_XY_DRIFT) and
                         ((depth_z >= self.TAP_MIN_PRESS_DEPTH) or
@@ -471,7 +474,7 @@ class PoseDetectorMP:
                 last_tap = state.get('last_tap', 0.0)
                 gap = now - last_tap if last_tap > 0.0 else 1e9
 
-                # Check for double tap
+                # Double tap if gap between taps fits in interval and not in cooldown
                 if ((last_tap > 0.0) and
                     (self.TAP_MIN_INTERVAL <= gap <= self.TAP_MAX_INTERVAL) and
                     (now >= state.get('cooldown_until', 0.0))):
@@ -538,11 +541,11 @@ class PoseDetectorMP:
         Returns:
             float: Extension ratio (0-1)
         """
-        d = np.linalg.norm(coors[0, :] - coors[3, :])
-        a = np.linalg.norm(coors[0, :] - coors[1, :])
-        b = np.linalg.norm(coors[1, :] - coors[2, :])
-        c = np.linalg.norm(coors[2, :] - coors[3, :])
-        return d / (a + b + c + 1e-6)
+        d = np.linalg.norm(coors[0, :] - coors[3, :])  # straight-line base->tip
+        a = np.linalg.norm(coors[0, :] - coors[1, :])  # bone 1 length
+        b = np.linalg.norm(coors[1, :] - coors[2, :])  # bone 2 length
+        c = np.linalg.norm(coors[2, :] - coors[3, :])  # bone 3 length
+        return d / (a + b + c + 1e-6)                  # epsilon avoids div-by-zero
 
 
 class PoseDetectorMPEnhanced(PoseDetectorMP):
@@ -597,6 +600,7 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
 
     @staticmethod
     def _Lm(hand_landmarks, i, w=1.0, h=1.0):
+        """Return landmark i as [x_px, y_px, z_rel] scaled by frame size."""
         lm = hand_landmarks.landmark[i]
         return np.array([lm.x * w, lm.y * h, float(lm.z)], dtype=float)
 
@@ -607,23 +611,24 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         p2 = self._Lm(hand_landmarks, 17, w, h)
         v1 = p1 - p0
         v2 = p2 - p0
-        n = np.cross(v1, v2)
+        n = np.cross(v1, v2)          # plane normal via cross product of two edges
         n_norm = np.linalg.norm(n) + 1e-9
-        n /= n_norm
+        n /= n_norm                   # normalize normal to unit length
         return p0, n
 
     def _plane_signed_distance_tip(self, hand_landmarks, w, h):
+        """Signed distance from fingertip to palm plane; sign indicates side of plane."""
         p0, n = self._palm_plane(hand_landmarks, w, h)
         tip = self._Lm(hand_landmarks, 8, w, h)
-        return float(np.dot(n, tip - p0)), n
+        return float(np.dot(n, tip - p0)), n  # distance = n · (x - p0)
 
     def _relative_tip_depth(self, hand_landmarks):
         """Tip Z relative to palm center Z (wrist + MCPs)."""
         idxs = [0, 5, 9, 13, 17]
         zs = [float(hand_landmarks.landmark[i].z) for i in idxs]
-        palm_z = float(np.median(zs))
+        palm_z = float(np.median(zs))      # robust palm depth via median
         tip_z = float(hand_landmarks.landmark[8].z)
-        return tip_z - palm_z  # relative (negative = closer to camera in MP coords)
+        return tip_z - palm_z              # negative => tip closer to camera
 
     def _index_dir(self, hand_landmarks, w, h):
         """Unit direction from index MCP(5) to tip(8)."""
@@ -631,11 +636,12 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         tip = self._Lm(hand_landmarks, 8, w, h)
         v = tip - mcp
         n = np.linalg.norm(v) + 1e-9
-        return v / n
+        return v / n                       # normalize to unit vector
 
     # ---------- Smoothing / state ----------
 
     def _get_plus_state(self, hand_key, now, pos_xy, zrel, ang, plane_d, palm_n):
+        """Get or initialize enhanced per-hand state (EMA, histories, peaks, timers)."""
         st = self._tap_state_plus.get(hand_key)
         if st is None:
             st = {
@@ -668,33 +674,35 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         return st
 
     def _ema(self, prev, x, alpha):
+        """Exponential moving average: alpha*x + (1-alpha)*prev (jitter smoothing)."""
         return alpha * x + (1.0 - alpha) * prev
 
     # ---------- Gating ----------
 
     def _is_motion_stable(self, st, now, pos_xy, palm_n):
-        # XY velocity
+        """Check XY velocity median and palm rotation rate to gate accidental taps."""
+        # XY velocity in px/s
         dt = max(1e-3, now - st['prev_ts'])
         vxy = (np.array(pos_xy, dtype=float) - st['prev_xy']) / dt
-        # Palm rotation rate
+        # Palm rotation rate: angle = arccos(n_prev · n_curr); divide by dt => rad/s
         if len(st['palm_norm_hist']) >= 1:
             prev_n = st['palm_norm_hist'][-1]
             dot = float(np.clip(np.dot(prev_n, palm_n), -1.0, 1.0))
             rot = float(np.arccos(dot)) / dt
         else:
             rot = 0.0
-        # Keep histories
+        # Keep histories for robust median velocity
         st['xy_hist'].append(vxy)
         st['palm_norm_hist'].append(palm_n)
-        # Stability check (median for robustness)
         if len(st['xy_hist']) >= 3:
-            v_med = np.median(np.linalg.norm(np.vstack(st['xy_hist']), axis=1))
+            v_med = np.median(np.linalg.norm(np.vstack(st['xy_hist']), axis=1))  # median speed
         else:
             v_med = np.linalg.norm(vxy)
         return (v_med <= self.STABLE_XY_VEL_MAX) and (rot <= self.STABLE_ROT_MAX)
 
     def _confidence_ok(self, score, st):
-        # Landmark jitter from recent XY history
+        """Gate on detector confidence and landmark jitter to avoid low-quality frames."""
+        # Landmark jitter ~ median(|vx|)+median(|vy|) over short history
         if len(st['xy_hist']) >= 4:
             xs = [v[0] for v in st['xy_hist']]
             ys = [v[1] for v in st['xy_hist']]
@@ -706,25 +714,29 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
     # ---------- Thresholding / baselines ----------
 
     def _adaptive_baseline(self, hist, fallback):
+        """Robust baseline from history using median with fallback when short."""
         if len(hist) >= 5:
-            return float(np.median(hist))
+            return float(np.median(hist))  # median is robust to outliers
         return fallback
 
     def _noise_level(self, hist):
+        """Robust noise estimate using median of absolute first differences."""
         if len(hist) >= 2:
-            diffs = np.abs(np.diff(np.array(hist)))
+            diffs = np.abs(np.diff(np.array(hist)))  # frame-to-frame changes
             return float(np.median(diffs))
         return 0.0
 
     # ---------- Tiny classifier ----------
 
     def _tiny_cls_prob(self, features):
-        z = float(np.dot(self.CLS_WEIGHTS, features) + self.CLS_BIAS)
-        return 1.0 / (1.0 + np.exp(-z))
+        """Tiny logistic regression probability on engineered tap features."""
+        z = float(np.dot(self.CLS_WEIGHTS, features) + self.CLS_BIAS)  # linear score
+        return 1.0 / (1.0 + np.exp(-z))  # sigmoid maps score to [0,1]
 
     # ---------- Enhanced tap detection ----------
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
+        """Run base detect, compute enhanced signals, and fuse for safer outputs."""
         # Use cached base outputs when used in combination wrapper to avoid double-processing
         if getattr(self, "_skip_super", False) and hasattr(self, "_base_cache"):
             base_index_pos, base_status, base_img = self._base_cache
@@ -761,7 +773,7 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 if draw:
                     self._draw_hand_landmarks(img_out, hand_landmarks)
 
-                # Index position
+                # Index position (homography transform)
                 pos_x, pos_y, position = self._get_finger_position(hand_landmarks, 8, orig_w, orig_h, H)
                 if index_pos is None:
                     index_pos = np.array([position[0] / position[2], position[1] / position[2], 0.0], dtype=float)
@@ -789,19 +801,19 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 stable = self._is_motion_stable(st, now, (pos_x, pos_y), palm_n)
                 conf_ok = self._confidence_ok(score, st)
 
-                # Derivatives
+                # Derivatives of smoothed signals
                 dt = max(1e-3, now - st['prev_ts'])
                 vzrel = (st['ema_zrel'] - st['prev_zrel']) / dt
                 vang = (st['ema_ang'] - st['prev_ang']) / dt
                 vplane = (st['ema_plane'] - st['prev_plane']) / dt
 
-                # Ray-projection velocity (inward pulse along -index-dir)
+                # Ray-projection velocity (along index direction; inward is + via -idx_dir)
                 tip_prev = np.array([st['prev_xy'][0], st['prev_xy'][1], st['prev_zrel']], dtype=float)
                 tip_curr = np.array([pos_x, pos_y, st['ema_zrel']], dtype=float)
                 v_tip = (tip_curr - tip_prev) / dt
                 ray_in_v = float(np.dot(v_tip / (np.linalg.norm(v_tip) + 1e-9), -idx_dir))
 
-                # Baselines and noise-adaptive thresholds
+                # Baselines and noise-adaptive thresholds (median + robust diffs)
                 base_zrel = self._adaptive_baseline(st['zrel_hist'], st['prev_zrel'])
                 noise_zrel = self._noise_level(st['zrel_hist'])
                 dzrel_press = max(self.ZREL_BASE_DELTA, self.ZREL_NOISE_MULT * noise_zrel)
@@ -810,13 +822,13 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 noise_plane = self._noise_level(st['plane_hist'])
                 dplane_press = max(self.PLANE_BASE_DELTA, self.PLANE_NOISE_MULT * noise_plane)
 
-                # Triggers (note: MP z becomes more negative toward camera)
+                # Triggers (MP z is more negative toward camera)
                 zrel_press = (base_zrel - st['ema_zrel'] > dzrel_press) and (vzrel <= -self.TAP_MIN_VEL)
                 ang_press = (st['ema_ang'] - st['prev_ang'] > 0) and (vang >= self.ANG_MIN_VEL)
                 plane_press = (base_plane - st['ema_plane'] > dplane_press) and (vplane <= -self.TAP_MIN_VEL)
                 ray_press = (ray_in_v >= self.RAY_MIN_IN_VEL)
 
-                # Late fusion: require >=2 triggers and gates
+                # Late fusion: require >= 2 triggers and gates
                 start_ok = is_pointing and stable and conf_ok and (sum([zrel_press, ang_press, plane_press, ray_press]) >= 2)
 
                 # Start press
@@ -840,8 +852,8 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                     st['peak_plane_depth'] = max(st['peak_plane_depth'], base_plane - st['min_plane'])
                     st['peak_ang_depth'] = max(st['peak_ang_depth'], st['max_ang'] - st['prev_ang'])
 
-                    # Release conditions (consensus)
-                    back_zrel = st['ema_zrel'] - st['min_zrel']
+                    # Release conditions (consensus of signals or timeout)
+                    back_zrel = st['ema_zrel'] - st['min_zrel']  # amount returned after peak
                     enough_back_zrel = (st['peak_zrel_depth'] >= self.ZREL_MIN_PRESS_DEPTH) and (back_zrel >= self.TAP_MAX_RELEASE_BACK * st['peak_zrel_depth'])
                     vrel_release = (vzrel >= self.TAP_RELEASE_VEL) and ((now - st['press_start']) >= self.TAP_MIN_DURATION)
 
@@ -859,7 +871,7 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                                          enough_back_ang or vang_release])
 
                     if release_votes >= 2 or too_long:
-                        # Validate tap
+                        # Validate tap by duration, XY drift, and peak depth/angle excursion
                         duration = now - st['press_start']
                         drift = float(np.hypot(pos_x - st['press_start_xy'][0], pos_y - st['press_start_xy'][1]))
                         valid_rule = (duration >= self.TAP_MIN_DURATION) and (drift <= self.TAP_MAX_XY_DRIFT) and (
@@ -868,7 +880,7 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                             (st['peak_ang_depth'] >= self.ANG_MIN_PRESS_DEPTH)
                         )
 
-                        # Tiny classifier features
+                        # Tiny classifier over engineered features for final validation
                         feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
                                           drift, abs(vzrel), abs(vplane), duration], dtype=float)
                         prob = self._tiny_cls_prob(feats)
@@ -905,7 +917,7 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         # Normalize index position to 3-vector
         normalized = self._normalize_index_position(index_pos)
 
-        # Fuse enhanced outputs with base outputs
+        # Fuse enhanced outputs with base outputs (prefer stronger events)
         enhanced_status = movement_status
         final_pos = normalized if normalized is not None else base_index_pos
         if (base_status == 'double_tap') or (enhanced_status == 'double_tap'):
@@ -920,6 +932,7 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
 
     # ---------- Stronger pointing gate ----------
     def _strong_pointing_gate(self, hand_landmarks, w, h):
+        """Stricter pointing gate using extension ratios of each finger."""
         def L(i):
             lm = hand_landmarks.landmark[i]
             return np.array([lm.x, lm.y, lm.z], dtype=float)
@@ -927,15 +940,16 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         mid = np.array([L(i) for i in [9, 10, 11, 12]])
         rng = np.array([L(i) for i in [13, 14, 15, 16]])
         ltl = np.array([L(i) for i in [17, 18, 19, 20]])
-        r_idx = self.ratio(idx)
-        r_mid = self.ratio(mid)
-        r_rng = self.ratio(rng)
-        r_ltl = self.ratio(ltl)
+        r_idx = self.ratio(idx)    # index extension ratio
+        r_mid = self.ratio(mid)    # middle extension ratio
+        r_rng = self.ratio(rng)    # ring extension ratio
+        r_ltl = self.ratio(ltl)    # little extension ratio
         others_max = max(r_mid, r_rng, r_ltl)
         return (r_idx >= self.INDEX_STRONG_MIN) and (others_max <= self.OTHERS_STRONG_MAX)
 
 # --- Combination wrapper to run base + enhanced and fuse outputs ---
 class CombinedPoseDetector:
+    """Wrapper that preserves base behavior and layers enhanced precision on top."""
     def __init__(self, model):
         self.base = PoseDetectorMP(model)
         self.enh = PoseDetectorMPEnhanced(model)
@@ -945,6 +959,7 @@ class CombinedPoseDetector:
         self.image_map_color = self.base.image_map_color
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
+        """Run base pass, cache outputs, then run enhanced and fuse results."""
         base_index_pos, base_status, base_img = self.base.detect(image, H, _, processing_scale, draw)
         # Cache base outputs for the enhanced detector
         self.enh._base_cache = (base_index_pos, base_status, base_img)
