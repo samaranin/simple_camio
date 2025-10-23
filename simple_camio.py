@@ -13,6 +13,7 @@ import queue
 import threading
 import signal
 import logging
+import numpy as np  # moved to top to avoid per-call imports
 
 # Import from new modular structure
 from config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetectionConfig
@@ -107,6 +108,18 @@ def setup_camera(cam_port):
     except Exception as e:
         logger.warning(f"Could not set camera buffer size: {e}")
 
+    # Enable OpenCV optimizations and set a reasonable thread count
+    try:
+        cv.setUseOptimized(True)
+    except Exception:
+        pass
+    try:
+        # Use about half the CPUs to reduce contention with Python threads
+        num_threads = max(1, int(getattr(cv, "getNumberOfCPUs", lambda: 4)() // 2))
+        cv.setNumThreads(num_threads)
+    except Exception:
+        pass
+
     return cap
 
 
@@ -196,8 +209,6 @@ def feed_worker_queues(frame, gray, workers, model_detector):
         workers (dict): Worker threads and queues
         model_detector: SIFT detector instance
     """
-    import numpy as np
-
     # Feed SIFT worker (always use latest frame, drop old ones)
     try:
         workers['sift_queue'].put_nowait(gray)

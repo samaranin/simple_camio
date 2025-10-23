@@ -50,6 +50,9 @@ class PoseDetectorMP:
         self._load_tap_config()
 
         logger.info("Initialized MediaPipe pose detector")
+        # Cache for reusing MP results (results object and frame dims)
+        self._last_mp_results = None
+        self._last_frame_dims = None  # (orig_w, orig_h)
 
     def _load_tap_config(self):
         """Load tap detection configuration parameters."""
@@ -108,13 +111,19 @@ class PoseDetectorMP:
         small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
         results = self.hands.process(small_rgb)
 
+        # Cache MediaPipe results and original frame dims for reuse
+        orig_h, orig_w = image.shape[0], image.shape[1]
+        self._last_mp_results = results
+        self._last_frame_dims = (orig_w, orig_h)
+
         img_out = image.copy() if draw else None
         index_pos = None
         movement_status = None
         double_tap_emitted = False
 
         if results.multi_hand_landmarks:
-            orig_h, orig_w = image.shape[0], image.shape[1]
+            # use cached dims above
+            orig_h, orig_w = self._last_frame_dims
 
             for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 # Get hand label ('Left' or 'Right') for stable tracking
@@ -547,6 +556,19 @@ class PoseDetectorMP:
         c = np.linalg.norm(coors[2, :] - coors[3, :])  # bone 3 length
         return d / (a + b + c + 1e-6)                  # epsilon avoids div-by-zero
 
+    # Add a small accessor to pass cached MP results to the enhanced detector
+    def get_cached_mp_results(self):
+        """
+        Return cached MediaPipe results and frame dimensions from the last detect call.
+
+        Returns:
+            tuple: (results, orig_w, orig_h) or (None, None, None) if unavailable
+        """
+        if self._last_mp_results is None or self._last_frame_dims is None:
+            return None, None, None
+        ow, oh = self._last_frame_dims[0], self._last_frame_dims[1]
+        return self._last_mp_results, ow, oh
+
 
 class PoseDetectorMPEnhanced(PoseDetectorMP):
     """
@@ -743,22 +765,33 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         else:
             base_index_pos, base_status, base_img = super().detect(image, H, _, processing_scale, draw)
 
-        # Now run the enhanced pipeline and fuse it with base outputs.
-        # Downscale image for faster processing
-        if processing_scale < 1.0:
-            small = cv.resize(image, (0, 0), fx=processing_scale, fy=processing_scale,
-                              interpolation=cv.INTER_LINEAR)
-        else:
-            small = image
-        small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
-        results = self.hands.process(small_rgb)
+        # If CombinedPoseDetector provided MP results, use them; otherwise, process once here
+        results = None
+        ow = oh = None
+        provided = getattr(self, "_provided_results", None)
+        if provided is not None:
+            try:
+                results, ow, oh = provided
+            except Exception:
+                results, ow, oh = None, None, None
+
+        if results is None:
+            # No provided results; compute once (fallback)
+            if processing_scale < 1.0:
+                small = cv.resize(image, (0, 0), fx=processing_scale, fy=processing_scale,
+                                  interpolation=cv.INTER_LINEAR)
+            else:
+                small = image
+            small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
+            results = self.hands.process(small_rgb)
+            oh, ow = image.shape[0], image.shape[1]
 
         img_out = image.copy() if draw else None
         index_pos = None
         movement_status = None
 
-        if results.multi_hand_landmarks:
-            orig_h, orig_w = image.shape[0], image.shape[1]
+        if results and results.multi_hand_landmarks:
+            orig_h, orig_w = (oh, ow) if (ow is not None and oh is not None) else (image.shape[0], image.shape[1])
             for h_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness_msg = MessageToDict(results.multi_handedness[h_idx])['classification'][0]
                 handedness = handedness_msg.get('label', 'Unknown')
@@ -914,10 +947,8 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 if movement_status != 'double_tap':
                     movement_status = 'pointing' if is_pointing else 'moving'
 
-        # Normalize index position to 3-vector
+        # Normalize and fuse with base outputs
         normalized = self._normalize_index_position(index_pos)
-
-        # Fuse enhanced outputs with base outputs (prefer stronger events)
         enhanced_status = movement_status
         final_pos = normalized if normalized is not None else base_index_pos
         if (base_status == 'double_tap') or (enhanced_status == 'double_tap'):
@@ -963,4 +994,7 @@ class CombinedPoseDetector:
         base_index_pos, base_status, base_img = self.base.detect(image, H, _, processing_scale, draw)
         # Cache base outputs for the enhanced detector
         self.enh._base_cache = (base_index_pos, base_status, base_img)
+        # Also pass through the raw MediaPipe results to avoid a second pass
+        mp_results, ow, oh = self.base.get_cached_mp_results()
+        self.enh._provided_results = (mp_results, ow, oh)
         return self.enh.detect(image, H, _, processing_scale, draw)
