@@ -1,551 +1,551 @@
-import os
-import sys
+"""
+Simple CamIO - Interactive Map System with Hand Tracking.
+
+This is the main entry point for the CamIO system, which uses hand tracking
+and gesture recognition to enable interactive exploration of physical maps.
+"""
+
 import cv2 as cv
 import time
-import numpy as np
-import json
 import argparse
-import pyglet.media
-from collections import deque
-from simple_camio_2d import InteractionPolicy2D, CamIOPlayer2D
-from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP
-import threading
+import pyglet
 import queue
+import threading
 import signal
+import logging
+
+# Import from new modular structure
+from config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetectionConfig
+from utils import select_camera_port, load_map_parameters, draw_rectangle_on_image, draw_rectangle_from_points, is_gesture_valid
+from audio import AmbientSoundPlayer, ZoneAudioPlayer
+from gesture_detection import GestureDetector, MovementMedianFilter
+from pose_detector import CombinedPoseDetector
+from sift_detector import SIFTModelDetectorMP
+from interaction_policy import InteractionPolicy2D
+from workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-class MovementFilter:
-    def __init__(self):
-        self.prev_position = None
-        self.BETA = 0.5
+def initialize_system(model_path):
+    """
+    Initialize all system components.
 
-    def push_position(self, position):
-        if self.prev_position is None:
-            self.prev_position = position
-        else:
-            self.prev_position = self.prev_position*(1-self.BETA) + position*self.BETA
-        return self.prev_position
+    Args:
+        model_path (str): Path to the map configuration JSON file
 
+    Returns:
+        dict: Dictionary containing all initialized components
+    """
+    logger.info("Initializing CamIO system...")
 
-class MovementMedianFilter:
-    def __init__(self):
-        self.MAX_QUEUE_LENGTH = 30
-        self.positions = deque(maxlen=self.MAX_QUEUE_LENGTH)
-        self.times = deque(maxlen=self.MAX_QUEUE_LENGTH)
-        self.AVERAGING_TIME = .7
+    # Load map configuration
+    model = load_map_parameters(model_path)
 
-    def push_position(self, position):
-        self.positions.append(position)
-        now = time.time()
-        self.times.append(now)
-        i = len(self.times)-1
-        Xs = []
-        Ys = []
-        Zs = []
-        while i >= 0 and now - self.times[i] < self.AVERAGING_TIME:
-            Xs.append(self.positions[i][0])
-            Ys.append(self.positions[i][1])
-            Zs.append(self.positions[i][2])
-            i -= 1
-        return np.array([np.median(Xs), np.median(Ys), np.median(Zs)])
+    # Select camera
+    cam_port = select_camera_port()
 
-class GestureDetector:
-    def __init__(self):
-        self.MAX_QUEUE_LENGTH = 30
-        self.positions = deque(maxlen=self.MAX_QUEUE_LENGTH)
-        self.times = deque(maxlen=self.MAX_QUEUE_LENGTH)
-        self.DWELL_TIME_THRESH = .75
-        self.X_MVMNT_THRESH = 0.95
-        self.Y_MVMNT_THRESH = 0.95
-        self.Z_MVMNT_THRESH = 4.0
+    # Initialize components based on model type
+    if model["modelType"] == "sift_2d_mediapipe":
+        model_detector = SIFTModelDetectorMP(model)
+        pose_detector = CombinedPoseDetector(model)
+        gesture_detector = GestureDetector()
+        motion_filter = MovementMedianFilter()
+        interact = InteractionPolicy2D(model)
+        camio_player = ZoneAudioPlayer(model)
+        crickets_player = AmbientSoundPlayer(model['crickets'])
+        heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
+    else:
+        logger.error(f"Unknown model type: {model['modelType']}")
+        raise ValueError(f"Unsupported model type: {model['modelType']}")
 
-    def push_position(self, position):
-        self.positions.append(position)
-        now = time.time()
-        self.times.append(now)
-        i = len(self.times)-1
-        Xs = []
-        Ys = []
-        Zs = []
-        while (i >= 0 and now - self.times[i] < self.DWELL_TIME_THRESH):
-            Xs.append(self.positions[i][0])
-            Ys.append(self.positions[i][1])
-            Zs.append(self.positions[i][2])
-            i -= 1
-        Xdiff = max(Xs) - min(Xs)
-        Ydiff = max(Ys) - min(Ys)
-        Zdiff = max(Zs) - min(Zs)
-        print("(i: " + str(i) + ") X: " + str(Xdiff) + ", Y: " + str(Ydiff) + ", Z: " + str(Zdiff))
-        if Xdiff < self.X_MVMNT_THRESH and Ydiff < self.Y_MVMNT_THRESH and Zdiff < self.Z_MVMNT_THRESH:
-            return np.array([sum(Xs)/float(len(Xs)), sum(Ys)/float(len(Ys)), sum(Zs)/float(len(Zs))]), 'still'
-        else:
-            return position, 'moving'
+    # Configure audio
+    heartbeat_player.set_volume(AudioConfig.HEARTBEAT_VOLUME)
+    # Note: Welcome message will be played by AudioWorker after it starts
+
+    logger.info("System initialization complete")
+
+    return {
+        'model': model,
+        'cam_port': cam_port,
+        'model_detector': model_detector,
+        'pose_detector': pose_detector,
+        'gesture_detector': gesture_detector,
+        'motion_filter': motion_filter,
+        'interact': interact,
+        'camio_player': camio_player,
+        'crickets_player': crickets_player,
+        'heartbeat_player': heartbeat_player
+    }
 
 
-class AmbientSoundPlayer:
-    def __init__(self, soundfile):
-        self.sound = pyglet.media.load(soundfile, streaming=False)
-        self.player = pyglet.media.Player()
-        self.player.queue(self.sound)
-        self.player.eos_action = 'loop'
-        self.player.loop = True
+def setup_camera(cam_port):
+    """
+    Initialize and configure the camera.
 
-    def set_volume(self, volume):
-        if 0 <= volume <= 1:
-            self.player.volume = volume
+    Args:
+        cam_port (int): Camera port number
 
-    def play_sound(self):
-        if not self.player.playing:
-            self.player.play()
+    Returns:
+        cv.VideoCapture: Configured camera capture object
+    """
+    logger.info(f"Setting up camera on port {cam_port}")
 
-    def pause_sound(self):
-        if self.player.playing:
-            self.player.pause()
+    cap = cv.VideoCapture(cam_port, cv.CAP_DSHOW)
+    cap.set(cv.CAP_PROP_FRAME_HEIGHT, CameraConfig.DEFAULT_HEIGHT)
+    cap.set(cv.CAP_PROP_FRAME_WIDTH, CameraConfig.DEFAULT_WIDTH)
+    cap.set(cv.CAP_PROP_FOCUS, CameraConfig.FOCUS)
 
-
-def draw_rect_in_image(image, sz, H):
-    img_corners = np.array([[0,0],[sz[1],0],[sz[1],sz[0]],[0,sz[0]]], dtype=np.float32)
-    img_corners = np.reshape(img_corners, [-1, 1, 2])
-    H_inv = np.linalg.inv(H)
-    pts = cv.perspectiveTransform(img_corners, H_inv)
-
-    # Draw actual rectangle with lines instead of dots
-    pts_int = np.int32(pts)
-    cv.polylines(image, [pts_int], isClosed=True, color=(0, 255, 0), thickness=3)
-
-    # Optionally draw corner dots for emphasis
-    for pt in pts:
-        cv.circle(image, (int(pt[0][0]), int(pt[0][1])), 5, (0, 255, 0), -1)
-
-    return image
-
-
-def draw_rect_pts(image, pts, color=(0,255,0), thickness=3):
-    """Draw polygon from pts in same format as cv.perspectiveTransform output."""
-    if pts is None:
-        return image
+    # Reduce latency
     try:
-        pts_int = np.int32(pts)
-        cv.polylines(image, [pts_int], isClosed=True, color=color, thickness=thickness)
-        # keep corner dots as subtle markers
-        for pt in pts.reshape(-1, 2):
-            cv.circle(image, (int(pt[0]), int(pt[1])), 4, color, -1)
-    except Exception:
-        pass
-    return image
+        cap.set(cv.CAP_PROP_BUFFERSIZE, CameraConfig.BUFFER_SIZE)
+    except Exception as e:
+        logger.warning(f"Could not set camera buffer size: {e}")
 
-def select_cam_port():
-    available_ports, working_ports, non_working_ports = list_ports()
-    if len(working_ports) == 1:
-        return working_ports[0][0]
-    elif len(working_ports) > 1:
-        print("The following cameras were detected:")
-        for i in range(len(working_ports)):
-            print(f'{i}) Port {working_ports[i][0]}: {working_ports[i][1]} x {working_ports[i][2]}')
-        cam_selection = input("Please select which camera you would like to use: ")
-        return working_ports[int(cam_selection)][0]
-    else:
-        return 0
+    return cap
 
-def list_ports():
+
+def create_worker_threads(components, stop_event):
     """
-    Test the ports and returns a tuple with the available ports and the ones that are working.
+    Create and start background worker threads.
+
+    Args:
+        components (dict): Dictionary of system components
+        stop_event (threading.Event): Event for coordinated shutdown
+
+    Returns:
+        dict: Dictionary containing workers and synchronization objects
     """
-    non_working_ports = []
-    dev_port = 0
-    working_ports = []
-    available_ports = []
-    while len(non_working_ports) < 3:  # if there are more than 2 non working ports stop the testing.
-        camera = cv.VideoCapture(dev_port)
-        if not camera.isOpened():
-            non_working_ports.append(dev_port)
-            print("Port %s is not working." % dev_port)
-        else:
-            is_reading, img = camera.read()
-            w = camera.get(3)
-            h = camera.get(4)
-            if is_reading:
-                print("Port %s is working and reads images (%s x %s)" % (dev_port, h, w))
-                working_ports.append((dev_port, h, w))
-            else:
-                print("Port %s for camera ( %s x %s) is present but does not read." % (dev_port, h, w))
-                available_ports.append(dev_port)
-        dev_port += 1
-    return available_ports, working_ports, non_working_ports
+    logger.info("Creating worker threads...")
+
+    # Create queues
+    pose_queue = queue.Queue(maxsize=WorkerConfig.POSE_QUEUE_MAXSIZE)
+    sift_queue = queue.Queue(maxsize=WorkerConfig.SIFT_QUEUE_MAXSIZE)
+    lock = threading.Lock()
+
+    # Create workers
+    pose_worker = PoseWorker(
+        components['pose_detector'],
+        pose_queue,
+        lock,
+        processing_scale=CameraConfig.POSE_PROCESSING_SCALE,
+        stop_event=stop_event
+    )
+
+    sift_worker = SIFTWorker(
+        components['model_detector'],
+        sift_queue,
+        lock,
+        stop_event=stop_event
+    )
+
+    # Create audio worker for non-blocking audio playback
+    audio_worker = AudioWorker(
+        components['camio_player'],
+        components['heartbeat_player'],
+        components['crickets_player'],
+        stop_event
+    )
+
+    # Start workers
+    pose_worker.start()
+    sift_worker.start()
+    audio_worker.start()
+
+    # Play welcome message through audio worker
+    audio_worker.enqueue_command(AudioCommand('play_welcome'))
+
+    logger.info("Worker threads started")
+
+    return {
+        'pose_queue': pose_queue,
+        'sift_queue': sift_queue,
+        'lock': lock,
+        'pose_worker': pose_worker,
+        'sift_worker': sift_worker,
+        'audio_worker': audio_worker
+    }
 
 
-# Function to load map parameters from a JSON file
-def load_map_parameters(filename):
-    if os.path.isfile(filename):
-        with open(filename, 'r') as f:
-            map_params = json.load(f)
-            print("loaded map parameters from file.")
-    else:
-        print("No map parameters file found at " + filename)
-        print("Usage: simple_camio.exe --input1 <filename>")
-        print(" ")
-        print("Press any key to exit.")
-        _ = sys.stdin.read(1)
-        exit(0)
-    return map_params['model']
+def setup_signal_handler(stop_event):
+    """
+    Setup signal handler for graceful shutdown.
+
+    Args:
+        stop_event (threading.Event): Event to signal on interrupt
+    """
+    def signal_handler(sig, frame):
+        logger.info("Signal received, shutting down...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, signal_handler)
 
 
-# Insert worker threads for async processing
-class PoseWorker(threading.Thread):
-    def __init__(self, pose_detector, in_queue, lock, processing_scale=0.5, stop_event=None):
-        super().__init__(daemon=True)
-        self.pose_detector = pose_detector
-        self.in_queue = in_queue
-        self.lock = lock
-        self.processing_scale = processing_scale
-        self.latest = (None, None, None)  # gesture_loc, status, annotated_image
-        self.running = True
-        self.stop_event = stop_event
+def feed_worker_queues(frame, gray, workers, model_detector):
+    """
+    Feed frames to worker queues for background processing.
 
-    def run(self):
-        while self.running and (self.stop_event is None or not self.stop_event.is_set()):
+    Args:
+        frame: Color camera frame
+        gray: Grayscale camera frame
+        workers (dict): Worker threads and queues
+        model_detector: SIFT detector instance
+    """
+    import numpy as np
+
+    # Feed SIFT worker (always use latest frame, drop old ones)
+    try:
+        workers['sift_queue'].put_nowait(gray)
+    except queue.Full:
+        try:
+            _ = workers['sift_queue'].get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            workers['sift_queue'].put_nowait(gray)
+        except queue.Full:
+            pass
+
+    # Feed pose worker with frame and current homography
+    H_current = model_detector.H if model_detector.H is not None else np.eye(3)
+    try:
+        workers['pose_queue'].put_nowait((frame, H_current))
+    except queue.Full:
+        try:
+            _ = workers['pose_queue'].get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            workers['pose_queue'].put_nowait((frame, H_current))
+        except queue.Full:
+            pass
+
+
+def process_gestures_and_audio(gesture_loc, gesture_status, components,
+                               last_double_tap_ts, audio_worker):
+    """
+    Process detected gestures and trigger appropriate audio feedback.
+
+    Args:
+        gesture_loc: Detected gesture location
+        gesture_status: Status of the gesture
+        components (dict): System components
+        last_double_tap_ts (float): Timestamp of last double-tap
+        audio_worker (AudioWorker): Audio worker for non-blocking playback
+
+    Returns:
+        float: Updated last_double_tap_ts
+    """
+    if not is_gesture_valid(gesture_loc):
+        audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
+        return last_double_tap_ts
+
+    # Handle double-tap
+    if gesture_status == 'double_tap':
+        now = time.time()
+        # Suppress repeated processing of same double-tap
+        if now - last_double_tap_ts > TapDetectionConfig.DOUBLE_TAP_COOLDOWN_MAIN:
             try:
-                frame, H = self.in_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            # run detector (downscaled inside)
-            try:
-                gesture_loc, gesture_status, annotated = self.pose_detector.detect(
-                    frame, H, None, processing_scale=self.processing_scale, draw=True
+                zone_id = components['interact'].push_gesture(gesture_loc)
+                audio_worker.enqueue_command(
+                    AudioCommand('play_zone', zone_id=zone_id, gesture_status='double_tap')
                 )
+                last_double_tap_ts = now
+                logger.info(f"Double-tap processed for zone {zone_id}")
             except Exception as e:
-                gesture_loc, gesture_status, annotated = None, None, None
-            # Defensive normalization: ensure gesture_loc is either None or a 1D ndarray with 3 elements
-            if gesture_loc is not None:
-                arr = np.asarray(gesture_loc)
-                if arr.size == 0:
-                    gesture_loc = None
-                elif arr.size >= 3:
-                    if arr.size % 3 == 0 and arr.size > 3:
-                        gesture_loc = arr.reshape(-1, 3)[-1].astype(float)
-                    else:
-                        gesture_loc = arr.flatten()[:3].astype(float)
-                else:
-                    gesture_loc = None
+                logger.error(f"Error handling double_tap: {e}")
+    else:
+        # Normal gesture processing
+        audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
+        zone_id = components['interact'].push_gesture(gesture_loc)
+        audio_worker.enqueue_command(
+            AudioCommand('play_zone', zone_id=zone_id, gesture_status=gesture_status)
+        )
 
-            with self.lock:
-                self.latest = (gesture_loc, gesture_status, annotated)
-
-    def stop(self):
-        self.running = False
-        if self.stop_event is not None:
-            self.stop_event.set()
+    return last_double_tap_ts
 
 
-class SIFTWorker(threading.Thread):
-    def __init__(self, sift_detector, in_queue, lock, stop_event=None):
-        super().__init__(daemon=True)
-        self.sift_detector = sift_detector
-        self.in_queue = in_queue
-        self.lock = lock
-        self.running = True
-        self.force_redetect = False
-        self.validate_interval = 2.0
-        self._last_validation_ts = 0.0
-        self.stop_event = stop_event
+def draw_map_tracking(display_img, model_detector, interact, rect_flash_remaining):
+    """
+    Draw the map tracking rectangle on the display image.
 
-    def run(self):
-        """
-        Process frames from the queue.
-        - If homography is missing or forced: run full detection attempts.
-        - Else: periodically run quick validation in the background.
-        """
-        RETRIES = 3
-        while self.running and (self.stop_event is None or not self.stop_event.is_set()):
+    Args:
+        display_img: Image to draw on
+        model_detector: SIFT detector with tracking info
+        interact: Interaction policy with map shape
+        rect_flash_remaining (int): Frames remaining for flash effect
+
+    Returns:
+        tuple: (updated_image, updated_flash_remaining)
+    """
+    if getattr(model_detector, 'last_rect_pts', None) is not None:
+        if rect_flash_remaining > 0:
+            display_img = draw_rectangle_from_points(
+                display_img, model_detector.last_rect_pts,
+                color=UIConfig.COLOR_YELLOW, thickness=5
+            )
+            rect_flash_remaining -= 1
+        else:
+            display_img = draw_rectangle_from_points(
+                display_img, model_detector.last_rect_pts,
+                color=UIConfig.COLOR_GREEN, thickness=3
+            )
+    else:
+        display_img = draw_rectangle_on_image(
+            display_img, interact.image_map_color.shape, model_detector.H
+        )
+
+    return display_img, rect_flash_remaining
+
+
+def draw_ui_overlay(display_img, model_detector, gesture_status, timer):
+    """
+    Draw status information overlay on the display image.
+
+    Args:
+        display_img: Image to draw on
+        model_detector: SIFT detector for status
+        gesture_status: Current gesture status
+        timer (float): Previous frame timestamp for FPS calculation
+
+    Returns:
+        float: Current timestamp (new timer value)
+    """
+    # Tracking status
+    status_text = model_detector.get_tracking_status()
+    cv.putText(display_img, status_text, (10, 30),
+              cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
+              UIConfig.COLOR_GREEN, UIConfig.FONT_THICKNESS)
+
+    # Gesture status
+    if gesture_status:
+        cv.putText(display_img, f"Gesture: {gesture_status}", (10, 90),
+                  cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
+                  UIConfig.COLOR_YELLOW, UIConfig.FONT_THICKNESS)
+
+    # FPS counter
+    prev_time = timer
+    current_time = time.time()
+    elapsed_time = current_time - prev_time
+    if elapsed_time > 0:
+        fps_text = f"FPS: {1/elapsed_time:.1f}"
+        cv.putText(display_img, fps_text, (10, 60),
+                  cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
+                  UIConfig.COLOR_GREEN, UIConfig.FONT_THICKNESS)
+
+    return current_time
+
+
+def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+    """
+    Handle keyboard input for user controls.
+
+    Args:
+        waitkey: Key code from cv.waitKey()
+        stop_event: Event for shutdown signaling
+        frame: Current camera frame
+        workers (dict): Worker threads and queues
+        components (dict): System components
+
+    Returns:
+        bool: True if should continue, False if should exit
+    """
+    # Quit
+    if waitkey == 27 or waitkey == ord('q'):
+        logger.info('Exiting...')
+        stop_event.set()
+        return False
+
+    # Manual re-detection
+    if waitkey == ord('h'):
+        logger.info("Manual re-detection triggered by user")
+        gray_now = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        components['model_detector'].requires_homography = True
+        components['model_detector'].last_rect_pts = None
+
+        # Force feed the frame to SIFT worker
+        for _ in range(3):
             try:
-                frame = self.in_queue.get(timeout=0.2)  # frame is expected to be grayscale full-res
-            except queue.Empty:
-                continue
-
-            try:
-                # If we already have a homography and no force, do lightweight validation on a cadence
-                if (not self.sift_detector.requires_homography) and (not self.force_redetect):
-                    now = time.time()
-                    if now - self._last_validation_ts >= self.validate_interval:
-                        self._last_validation_ts = now
-                        valid = self.sift_detector.quick_validate_position(frame, min_matches=6, position_threshold=40)
-                        if not valid:
-                            # Mark stale and immediately try a re-detect using the current frame
-                            self.sift_detector.requires_homography = True
-                            self.sift_detector.last_rect_pts = None
-                            # continue to detection path below
-                        else:
-                            # Nothing else to do this iteration
-                            continue
-
-                # Either we need homography or a manual re-detect was requested
-                detected = False
-                attempts = [frame]
-                # CLAHE
+                workers['sift_queue'].put_nowait(gray_now)
+            except queue.Full:
                 try:
-                    clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                    attempts.append(clahe.apply(frame))
-                except Exception:
+                    _ = workers['sift_queue'].get_nowait()
+                except queue.Empty:
                     pass
-                # slight blur
                 try:
-                    attempts.append(cv.GaussianBlur(frame, (5, 5), 0))
-                except Exception:
+                    workers['sift_queue'].put_nowait(gray_now)
+                except queue.Full:
                     pass
+        workers['sift_worker'].trigger_redetect()
 
-                for attempt_img in attempts:
-                    try:
-                        retval, H, _ = self.sift_detector.detect(attempt_img, force_redetect=self.force_redetect)
-                    except Exception:
-                        retval, H = False, None
+    # Toggle blips
+    if waitkey == ord('b'):
+        workers['audio_worker'].enqueue_command(AudioCommand('toggle_blips'))
 
-                    # consume force flag
-                    if self.force_redetect:
-                        self.force_redetect = False
-
-                    if retval and H is not None:
-                        detected = True
-                        break
-
-                if not detected:
-                    for _ in range(RETRIES):
-                        try:
-                            retval, H, _ = self.sift_detector.detect(frame, force_redetect=False)
-                        except Exception:
-                            retval, H = False, None
-                        if retval and H is not None:
-                            break
-
-            except Exception as e:
-                print(f"SIFTWorker error: {e}")
-                # loop continues
-
-    def trigger_redetect(self):
-        """Manually trigger re-detection"""
-        self.force_redetect = True
-
-    def stop(self):
-        self.running = False
-        if self.stop_event is not None:
-            self.stop_event.set()
+    return True
 
 
-parser = argparse.ArgumentParser(description='Code for CamIO.')
-parser.add_argument('--input1', help='Path to parameter json file.', default='models/UkraineMap/UkraineMap.json')
-args = parser.parse_args()
+def run_main_loop(cap, components, workers, stop_event):
+    """
+    Main processing loop for the CamIO system.
 
-model = load_map_parameters(args.input1)
+    Args:
+        cap: Camera capture object
+        components (dict): System components
+        workers (dict): Worker threads and queues
+        stop_event: Event for shutdown coordination
+    """
+    last_double_tap_ts = 0.0
+    rect_flash_remaining = 0
+    timer = time.time() - 1
 
-cam_port = select_cam_port()
+    logger.info("Starting main loop")
 
-# Initialize objects
-if model["modelType"] == "sift_2d_mediapipe":
-    model_detector = SIFTModelDetectorMP(model)
-    pose_detector = PoseDetectorMP(model)
-    gesture_detector = GestureDetector()
-    motion_filter = MovementMedianFilter()
-    interact = InteractionPolicy2D(model)
-    camio_player = CamIOPlayer2D(model)
-    camio_player.play_welcome()
-    crickets_player = AmbientSoundPlayer(model['crickets'])
-    heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
-
-heartbeat_player.set_volume(.05)
-cap = cv.VideoCapture(cam_port, cv.CAP_DSHOW)
-cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)
-cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)
-cap.set(cv.CAP_PROP_FOCUS, 0)
-# Reduce latency in some backends
-try:
-    cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
-except Exception:
-    pass
-
-# Create queues and workers
-pose_queue = queue.Queue(maxsize=1)
-sift_queue = queue.Queue(maxsize=1)
-lock = threading.Lock()
-
-# Add a stop event and attach a SIGINT handler
-stop_event = threading.Event()
-def _signal_handler(sig, frame):
-    print("Signal received, shutting down...")
-    stop_event.set()
-signal.signal(signal.SIGINT, _signal_handler)
-
-pose_worker = PoseWorker(pose_detector, pose_queue, lock, processing_scale=0.35, stop_event=stop_event)
-sift_worker = SIFTWorker(model_detector, sift_queue, lock, stop_event=stop_event)
-pose_worker.start()
-sift_worker.start()
-
-# Add suppression state for repeated double-tap handling
-last_double_tap_ts = 0.0
-DOUBLE_TAP_COOLDOWN_MAIN = 0.7
-
-timer = time.time() - 1
-print("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
-
-# Add small helper near main loop to check gesture validity
-def _gesture_valid(g):
-    return (g is not None) and (hasattr(g, "__len__")) and (np.asarray(g).size >= 3)
-
-# Remove validate_counter; keep flash counters
-rect_flash_remaining = 0
-RECT_FLASH_FRAMES = 10
-
-# Main loop - avoid heavy work in the UI thread
-try:
     while cap.isOpened() and not stop_event.is_set():
+        # Capture frame
         ret, frame = cap.read()
         if not ret:
-            print("No camera image returned.")
+            logger.error("No camera image returned")
             break
 
-        now_time = time.time()
-
-        # Prepare grayscale once and always feed the SIFT worker the newest frame (queue drops old)
+        # Convert to grayscale for SIFT
         gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        try:
-            sift_queue.put_nowait(gray)
-        except queue.Full:
-            try:
-                _ = sift_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                sift_queue.put_nowait(gray)
-            except queue.Full:
-                pass
 
-        # Push frame for pose worker (no copy; detect() will not draw by default)
-        H_current = model_detector.H if model_detector.H is not None else np.eye(3)
-        try:
-            pose_queue.put_nowait((frame, H_current))
-        except queue.Full:
-            try:
-                _ = pose_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                pose_queue.put_nowait((frame, H_current))
-            except queue.Full:
-                pass
+        # Feed worker queues
+        feed_worker_queues(frame, gray, workers, components['model_detector'])
 
-        # Retrieve latest pose worker output
-        with lock:
-            gesture_loc, gesture_status, annotated = pose_worker.latest
+        # Get latest pose detection results
+        with workers['lock']:
+            gesture_loc, gesture_status, annotated = workers['pose_worker'].latest
 
-        display_img = frame if (annotated is None) else annotated
+        display_img = frame if annotated is None else annotated
 
-        # If detector reports homography was updated, trigger flash highlight
-        if getattr(model_detector, 'homography_updated', False):
-            rect_flash_remaining = RECT_FLASH_FRAMES
-            model_detector.homography_updated = False
+        # Check for homography update (triggers flash)
+        if getattr(components['model_detector'], 'homography_updated', False):
+            rect_flash_remaining = UIConfig.RECT_FLASH_FRAMES
+            components['model_detector'].homography_updated = False
 
-        # PROCESS GESTURES AND INTERACTION
-        if model_detector.H is None:
-            heartbeat_player.pause_sound()
-            crickets_player.play_sound()
+        # Process based on map detection status
+        if components['model_detector'].H is None:
+            # Map not detected - play ambient crickets
+            workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
+            workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
         else:
-            # Ensure age counter increments even if detect() isn't called every frame
+            # Map detected - increment age counter
             try:
-                model_detector.frames_since_last_detection += 1
+                components['model_detector'].frames_since_last_detection += 1
             except Exception:
-                model_detector.frames_since_last_detection = 1
+                components['model_detector'].frames_since_last_detection = 1
 
-            # Draw rectangle from stored projected pts if available
-            if getattr(model_detector, 'last_rect_pts', None) is not None:
-                if rect_flash_remaining > 0:
-                    display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 255), thickness=5)
-                    rect_flash_remaining -= 1
-                else:
-                    display_img = draw_rect_pts(display_img, model_detector.last_rect_pts, color=(0, 255, 0), thickness=3)
-            else:
-                display_img = draw_rect_in_image(display_img, interact.image_map_color.shape, model_detector.H)
+            # Draw tracking rectangle
+            display_img, rect_flash_remaining = draw_map_tracking(
+                display_img, components['model_detector'],
+                components['interact'], rect_flash_remaining
+            )
 
-            if not _gesture_valid(gesture_loc):
-                heartbeat_player.pause_sound()
-            else:
-                # If a double-tap was detected by the pose detector, handle it explicitly
-                if gesture_status == 'double_tap':
-                    now = time.time()
-                    # suppress repeated processing of the same double-tap across consecutive frames
-                    if now - last_double_tap_ts > DOUBLE_TAP_COOLDOWN_MAIN:
-                        try:
-                            zone_id = interact.push_gesture(gesture_loc)
-                            camio_player.convey(zone_id, 'double_tap')
-                            last_double_tap_ts = now
-                        except Exception as e:
-                            print(f"Error handling double_tap: {e}")
-                else:
-                    heartbeat_player.play_sound()
-                    zone_id = interact.push_gesture(gesture_loc)
-                    camio_player.convey(zone_id, gesture_status)
+            # Process gestures and audio
+            last_double_tap_ts = process_gestures_and_audio(
+                gesture_loc, gesture_status, components, last_double_tap_ts,
+                workers['audio_worker']
+            )
 
-        # Add status overlay
-        status_text = model_detector.get_tracking_status()
-        cv.putText(display_img, status_text, (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # Draw UI overlay
+        timer = draw_ui_overlay(display_img, components['model_detector'],
+                               gesture_status, timer)
 
-        # Also show current gesture status for clarity while tuning
-        if gesture_status:
-            cv.putText(display_img, f"Gesture: {gesture_status}", (10, 90), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-        # Add FPS
-        prev_time = timer
-        timer = time.time()
-        elapsed_time = timer - prev_time
-        if elapsed_time > 0:
-            fps_text = f"FPS: {1/elapsed_time:.1f}"
-            cv.putText(display_img, fps_text, (10, 60), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
+        # Display the frame
         cv.imshow('image reprojection', display_img)
-        waitkey = cv.waitKey(1)
-        if waitkey == 27 or waitkey == ord('q'):
-            print('Exiting...')
-            stop_event.set()
-            break
-        if waitkey == ord('h'):
-            print("Manual re-detection triggered by user")
-            gray_now = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-            model_detector.requires_homography = True
-            model_detector.last_rect_pts = None
-            for _ in range(3):
-                try:
-                    sift_queue.put_nowait(gray_now)
-                except queue.Full:
-                    try:
-                        _ = sift_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        sift_queue.put_nowait(gray_now)
-                    except queue.Full:
-                        pass
-            sift_worker.trigger_redetect()
-        if waitkey == ord('b'):
-            camio_player.enable_blips = not camio_player.enable_blips
-            print("Blips " + ("enabled" if camio_player.enable_blips else "disabled"))
 
+        # Handle keyboard input
+        waitkey = cv.waitKey(1)
+        if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+            break
+
+        # Update Pyglet event loop
         pyglet.clock.tick()
         pyglet.app.platform_event_loop.dispatch_posted_events()
 
-except KeyboardInterrupt:
-    print("KeyboardInterrupt received, shutting down...")
-    stop_event.set()
 
-# shutdown
-pose_worker.stop()
-sift_worker.stop()
-# give threads a moment to exit cleanly
-pose_worker.join(timeout=2.0)
-sift_worker.join(timeout=2.0)
+def cleanup(cap, components, workers):
+    """
+    Clean up resources and shut down gracefully.
 
-try:
-    camio_player.play_goodbye()
-except Exception:
-    pass
-heartbeat_player.pause_sound()
-crickets_player.pause_sound()
-time.sleep(1)
-cap.release()
-cv.destroyAllWindows()
+    Args:
+        cap: Camera capture object
+        components (dict): System components
+        workers (dict): Worker threads
+    """
+    logger.info("Cleaning up resources...")
+
+    # Play goodbye message through audio worker before stopping it
+    try:
+        workers['audio_worker'].enqueue_command(AudioCommand('play_goodbye'))
+        # Give it a moment to play
+        time.sleep(0.5)
+    except Exception as e:
+        logger.error(f"Error queueing goodbye message: {e}")
+
+    # Stop worker threads
+    workers['pose_worker'].stop()
+    workers['sift_worker'].stop()
+    workers['audio_worker'].stop()
+
+    # Wait for threads to exit
+    workers['pose_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+    workers['sift_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+    workers['audio_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+
+    # Stop ambient sounds
+    components['heartbeat_player'].pause_sound()
+    components['crickets_player'].pause_sound()
+
+    # Brief delay for audio to finish
+    time.sleep(1)
+
+    # Release camera and close windows
+    cap.release()
+    cv.destroyAllWindows()
+
+    logger.info("Cleanup complete")
+
+
+# ==================== Main Entry Point ====================
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='CamIO - Interactive Map System')
+    parser.add_argument('--input1', help='Path to map configuration JSON file',
+                       default='models/UkraineMap/UkraineMap.json')
+    args = parser.parse_args()
+
+    # Initialize system
+    components = initialize_system(args.input1)
+    cap = setup_camera(components['cam_port'])
+
+    # Setup shutdown handling
+    stop_event = threading.Event()
+    setup_signal_handler(stop_event)
+
+    # Create worker threads
+    workers = create_worker_threads(components, stop_event)
+
+    # UI state
+    last_double_tap_ts = 0.0
+    rect_flash_remaining = 0
+    timer = time.time() - 1
+
+    logger.info("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
+
+    # ==================== Main Loop ====================
+    try:
+        run_main_loop(cap, components, workers, stop_event)
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received, shutting down...")
+        stop_event.set()
+    finally:
+        cleanup(cap, components, workers)
