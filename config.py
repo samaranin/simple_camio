@@ -95,6 +95,42 @@ class TapDetectionConfig:
     ANG_MIN_PRESS_DEPTH = 10.0      # Degrees (min peak flexion over baseline)
     ANG_RELEASE_BACK = 0.5          # Fraction of peak angle to return for release
 
+    # Enhanced detection parameters (used by PoseDetectorMPEnhanced)
+    # Palm plane penetration (signed distance) thresholds
+    PLANE_BASE_DELTA = 0.010
+    PLANE_NOISE_MULT = 4.0
+    PLANE_MIN_PRESS_DEPTH = 0.008
+    PLANE_RELEASE_BACK = 0.45
+
+    # Relative depth (tip Z relative to palm) thresholds
+    ZREL_BASE_DELTA = 0.010
+    ZREL_NOISE_MULT = 4.0
+    ZREL_MIN_PRESS_DEPTH = 0.010
+
+    # Temporal smoothing (EMA)
+    EWMA_ALPHA = 0.35
+
+    # Motion stability gates
+    STABLE_XY_VEL_MAX = 50.0        # px/s
+    STABLE_ROT_MAX = 0.25           # rad/s
+
+    # Landmark confidence/jitter gates
+    MIN_HAND_SCORE = 0.65
+    JITTER_MAX_PX = 3.0
+
+    # Ray-projection velocity threshold
+    RAY_MIN_IN_VEL = 0.10           # norm units/s
+
+    # Stronger pointing gate thresholds
+    INDEX_STRONG_MIN = 0.78
+    OTHERS_STRONG_MAX = 0.92
+
+    # Tiny classifier over engineered features
+    # Note: list is fine; implementation will coerce to np.array
+    CLS_WEIGHTS = [2.0, 1.2, 1.0, -0.8, -0.9, -0.4, 0.6]
+    CLS_BIAS = -2.0
+    CLS_MIN_PROB = 0.65
+
 
 # ==================== Interaction Policy Configuration ====================
 class InteractionConfig:
@@ -201,4 +237,3 @@ class WorkerConfig:
 
     # Thread shutdown timeout (seconds)
     THREAD_SHUTDOWN_TIMEOUT = 2.0
-

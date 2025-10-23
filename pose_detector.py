@@ -584,6 +584,42 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         super().__init__(model)
         # Extra per-hand state
         self._tap_state_plus = {}  # keyed by hand ('Left'/'Right')
+        # Load enhanced configuration parameters into instance
+        self._load_enhanced_config()
+
+    def _load_enhanced_config(self):
+        """Load enhanced tap detection configuration parameters."""
+        cfg = TapDetectionConfig
+        # Plane-distance thresholds
+        self.PLANE_BASE_DELTA = cfg.PLANE_BASE_DELTA
+        self.PLANE_NOISE_MULT = cfg.PLANE_NOISE_MULT
+        self.PLANE_MIN_PRESS_DEPTH = cfg.PLANE_MIN_PRESS_DEPTH
+        self.PLANE_RELEASE_BACK = cfg.PLANE_RELEASE_BACK
+        # Relative depth thresholds
+        self.ZREL_BASE_DELTA = cfg.ZREL_BASE_DELTA
+        self.ZREL_NOISE_MULT = cfg.ZREL_NOISE_MULT
+        self.ZREL_MIN_PRESS_DEPTH = cfg.ZREL_MIN_PRESS_DEPTH
+        # Smoothing
+        self.EWMA_ALPHA = cfg.EWMA_ALPHA
+        # Motion/rotation stability gates
+        self.STABLE_XY_VEL_MAX = cfg.STABLE_XY_VEL_MAX
+        self.STABLE_ROT_MAX = cfg.STABLE_ROT_MAX
+        # Confidence/jitter gates
+        self.MIN_HAND_SCORE = cfg.MIN_HAND_SCORE
+        self.JITTER_MAX_PX = cfg.JITTER_MAX_PX
+        # Ray velocity threshold
+        self.RAY_MIN_IN_VEL = cfg.RAY_MIN_IN_VEL
+        # Strong pointing gate
+        self.INDEX_STRONG_MIN = cfg.INDEX_STRONG_MIN
+        self.OTHERS_STRONG_MAX = cfg.OTHERS_STRONG_MAX
+        # Tiny classifier
+        try:
+            self.CLS_WEIGHTS = np.array(cfg.CLS_WEIGHTS, dtype=float)
+        except Exception:
+            # Fallback if already an np.array or other type
+            self.CLS_WEIGHTS = np.array([2.0, 1.2, 1.0, -0.8, -0.9, -0.4, 0.6], dtype=float)
+        self.CLS_BIAS = cfg.CLS_BIAS
+        self.CLS_MIN_PROB = cfg.CLS_MIN_PROB
 
     # ---------- Geometry helpers ----------
 
