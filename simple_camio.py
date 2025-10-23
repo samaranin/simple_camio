@@ -32,6 +32,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Reusable identity homography to avoid per-frame allocations
+IDENTITY_3 = np.eye(3, dtype=float)
+
 
 def initialize_system(model_path):
     """
@@ -223,7 +226,7 @@ def feed_worker_queues(frame, gray, workers, model_detector):
             pass
 
     # Feed pose worker with frame and current homography
-    H_current = model_detector.H if model_detector.H is not None else np.eye(3)
+    H_current = model_detector.H if model_detector.H is not None else IDENTITY_3
     try:
         workers['pose_queue'].put_nowait((frame, H_current))
     except queue.Full:

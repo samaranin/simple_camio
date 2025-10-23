@@ -109,6 +109,11 @@ class PoseDetectorMP:
 
         # Convert to RGB for MediaPipe (model expects RGB)
         small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
+        # Hint Mediapipe to avoid extra copies
+        try:
+            small_rgb.flags.writeable = False
+        except Exception:
+            pass
         results = self.hands.process(small_rgb)
 
         # Cache MediaPipe results and original frame dims for reuse
@@ -991,10 +996,9 @@ class CombinedPoseDetector:
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
         """Run base pass, cache outputs, then run enhanced and fuse results."""
-        base_index_pos, base_status, base_img = self.base.detect(image, H, _, processing_scale, draw)
-        # Cache base outputs for the enhanced detector
+        # Draw only once (in enhanced), keep base compute-only
+        base_index_pos, base_status, base_img = self.base.detect(image, H, _, processing_scale, draw=False)
         self.enh._base_cache = (base_index_pos, base_status, base_img)
-        # Also pass through the raw MediaPipe results to avoid a second pass
         mp_results, ow, oh = self.base.get_cached_mp_results()
         self.enh._provided_results = (mp_results, ow, oh)
         return self.enh.detect(image, H, _, processing_scale, draw)
