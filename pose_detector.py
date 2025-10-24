@@ -83,6 +83,10 @@ class PoseDetectorMP:
         self.ANG_MIN_PRESS_DEPTH = cfg.ANG_MIN_PRESS_DEPTH
         self.ANG_RELEASE_BACK = cfg.ANG_RELEASE_BACK
 
+        # New: allow taps while moving (non-pointing)
+        self.ALLOW_TAP_WHILE_MOVING = getattr(cfg, 'ALLOW_TAP_WHILE_MOVING', True)
+        self.MOVING_TAP_TRIGGER_COUNT = getattr(cfg, 'MOVING_TAP_TRIGGER_COUNT', 3)
+
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
         """
         Detect hand poses and gestures in the image.
@@ -406,7 +410,8 @@ class PoseDetectorMP:
                         dz_press, vz, baseline_ang, angle_deg, dang_press, vang,
                         pos_x, pos_y):
         """Try to start a tap press based on Z or angle triggers."""
-        if (not state['pressing']) and is_pointing and (now >= state.get('cooldown_until', 0.0)):
+        # Relaxed gate: allow press start while moving if enabled by config
+        if (not state['pressing']) and (is_pointing or self.ALLOW_TAP_WHILE_MOVING) and (now >= state.get('cooldown_until', 0.0)):
             # Z trigger: tip moved inward beyond baseline by dz_press and with sufficient inward speed
             z_press = (baseline_z - lm8_z > dz_press) and (vz <= -self.TAP_MIN_VEL)
             # Angle trigger: distal joint closing beyond baseline by dang_press and fast enough
@@ -866,8 +871,13 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 plane_press = (base_plane - st['ema_plane'] > dplane_press) and (vplane <= -self.TAP_MIN_VEL)
                 ray_press = (ray_in_v >= self.RAY_MIN_IN_VEL)
 
-                # Late fusion: require >= 2 triggers and gates
-                start_ok = is_pointing and stable and conf_ok and (sum([zrel_press, ang_press, plane_press, ray_press]) >= 2)
+                # Late fusion with moving support:
+                # - Pointing: need >=2 triggers
+                # - Moving (non-pointing): require stability, confidence, and stronger evidence (>= MOVING_TAP_TRIGGER_COUNT)
+                trigger_count = sum([zrel_press, ang_press, plane_press, ray_press])
+                start_ok_pointing = is_pointing and stable and conf_ok and (trigger_count >= 2)
+                start_ok_moving = (not is_pointing) and getattr(self, 'ALLOW_TAP_WHILE_MOVING', False) and stable and conf_ok and (trigger_count >= getattr(self, 'MOVING_TAP_TRIGGER_COUNT', 3))
+                start_ok = start_ok_pointing or start_ok_moving
 
                 # Start press
                 if (not st['pressing']) and start_ok and now >= st['cooldown_until']:

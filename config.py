@@ -131,6 +131,11 @@ class TapDetectionConfig:
     CLS_BIAS = -2.0
     CLS_MIN_PROB = 0.65
 
+    # Allow taps while not explicitly in a pointing pose
+    ALLOW_TAP_WHILE_MOVING = True
+    # For enhanced detector: require more concurrent triggers when not pointing
+    MOVING_TAP_TRIGGER_COUNT = 3
+
 
 # ==================== Interaction Policy Configuration ====================
 class InteractionConfig:
