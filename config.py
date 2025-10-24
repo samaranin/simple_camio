@@ -65,7 +65,13 @@ class GestureDetectorConfig:
 class TapDetectionConfig:
     """Configuration for single and double-tap detection."""
 
-    # Z-based tap detection parameters
+    # Hand size scaling parameters
+    REFERENCE_PALM_WIDTH = 180.0    # Reference palm width for "big hand" (pixels)
+    MIN_SCALE_FACTOR = 0.35         # Minimum scale factor for very small hands
+    MAX_SCALE_FACTOR = 1.0          # Maximum scale factor (no scaling up beyond reference)
+    SMALL_HAND_THRESHOLD = 80.0     # Palm width below which we apply aggressive scaling
+
+    # Z-based tap detection parameters (calibrated for reference hand size)
     TAP_BASE_DELTA = 0.025          # Base z delta vs baseline to start a press
     TAP_NOISE_MULT = 3.0            # Multiplier on median |dz| to raise threshold in noise
     TAP_MIN_VEL = 0.2               # Min negative z velocity to start a press
@@ -74,8 +80,8 @@ class TapDetectionConfig:
     TAP_MAX_DURATION = 0.50         # Maximum tap duration (seconds)
     TAP_MIN_INTERVAL = 0.05         # Minimum interval between taps (seconds)
     TAP_MAX_INTERVAL = 1.00         # Maximum interval between taps (seconds)
-    TAP_MIN_PRESS_DEPTH = 0.010     # Minimal press depth needed to consider a tap
-    TAP_MAX_XY_DRIFT = 180.0        # Maximum XY drift during a tap
+    TAP_MIN_PRESS_DEPTH = 0.010     # Minimal press depth needed to consider a tap (SCALED)
+    TAP_MAX_XY_DRIFT = 180.0        # Maximum XY drift during a tap (SCALED)
     TAP_MAX_RELEASE_BACK = 0.45     # Fraction of press depth required for release
 
     # History buffer sizes
@@ -88,24 +94,24 @@ class TapDetectionConfig:
 
     # Angle-based distal flexion thresholds (degrees)
     ANG_HISTORY_LEN = 7
-    ANG_BASE_DELTA = 12.0           # Min angle rise above baseline to start a press
+    ANG_BASE_DELTA = 12.0           # Min angle rise above baseline to start a press (SCALED)
     ANG_NOISE_MULT = 3.0            # Noise-adaptive margin
     ANG_MIN_VEL = 120.0             # Deg/s minimum rising angular velocity
     ANG_RELEASE_VEL = -120.0        # Deg/s negative velocity (falling) for release
-    ANG_MIN_PRESS_DEPTH = 10.0      # Degrees (min peak flexion over baseline)
+    ANG_MIN_PRESS_DEPTH = 10.0      # Degrees (min peak flexion over baseline) (SCALED)
     ANG_RELEASE_BACK = 0.5          # Fraction of peak angle to return for release
 
     # Enhanced detection parameters (used by PoseDetectorMPEnhanced)
     # Palm plane penetration (signed distance) thresholds
-    PLANE_BASE_DELTA = 0.010
+    PLANE_BASE_DELTA = 0.010        # (SCALED)
     PLANE_NOISE_MULT = 4.0
-    PLANE_MIN_PRESS_DEPTH = 0.008
+    PLANE_MIN_PRESS_DEPTH = 0.008   # (SCALED)
     PLANE_RELEASE_BACK = 0.45
 
     # Relative depth (tip Z relative to palm) thresholds
-    ZREL_BASE_DELTA = 0.010
+    ZREL_BASE_DELTA = 0.010         # (SCALED)
     ZREL_NOISE_MULT = 4.0
-    ZREL_MIN_PRESS_DEPTH = 0.010
+    ZREL_MIN_PRESS_DEPTH = 0.010    # (SCALED)
 
     # Temporal smoothing (EMA)
     EWMA_ALPHA = 0.35
@@ -119,7 +125,7 @@ class TapDetectionConfig:
     JITTER_MAX_PX = 3.0
 
     # Ray-projection velocity threshold
-    RAY_MIN_IN_VEL = 0.10           # norm units/s
+    RAY_MIN_IN_VEL = 0.10           # norm units/s (SCALED)
 
     # Stronger pointing gate thresholds
     INDEX_STRONG_MIN = 0.78
