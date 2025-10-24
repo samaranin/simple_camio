@@ -5,14 +5,6 @@ This module contains all configuration parameters and constants used throughout 
 Centralizing configuration makes it easier to tune parameters and understand system behavior.
 """
 
-import logging
-
-
-# ==================== Logging Configuration ====================
-LOG_LEVEL = logging.INFO
-LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-
-
 # ==================== Camera Configuration ====================
 class CameraConfig:
     """Camera capture configuration parameters."""
@@ -63,84 +55,116 @@ class GestureDetectorConfig:
 
 # ==================== Tap Detection Configuration ====================
 class TapDetectionConfig:
-    """Configuration for single and double-tap detection."""
+    """
+    Configuration for single and double-tap detection.
+    
+    This configuration supports adaptive tap detection that scales thresholds based on
+    hand size (distance from camera). Smaller hands (farther away) use more sensitive
+    thresholds to maintain consistent detection across all distances.
+    
+    The system uses multiple detection methods:
+    1. Z-depth analysis (finger tip depth changes)
+    2. Angle-based analysis (finger flexion at DIP joint)
+    3. Enhanced analysis (palm plane penetration, relative depth, ray projection)
+    """
 
-    # Hand size scaling parameters
-    REFERENCE_PALM_WIDTH = 180.0    # Reference palm width for "big hand" (pixels)
-    MIN_SCALE_FACTOR = 0.35         # Minimum scale factor for very small hands
-    MAX_SCALE_FACTOR = 1.0          # Maximum scale factor (no scaling up beyond reference)
+    # ==================== Hand Size Scaling ====================
+    # Adaptive scaling ensures consistent tap detection regardless of hand distance
+    REFERENCE_PALM_WIDTH = 180.0    # Reference palm width for "big hand" at close range (pixels)
+    MIN_SCALE_FACTOR = 0.35         # Minimum scale factor for very small/distant hands (more sensitive)
+    MAX_SCALE_FACTOR = 1.0          # Maximum scale factor (no scaling beyond reference)
     SMALL_HAND_THRESHOLD = 80.0     # Palm width below which we apply aggressive scaling
 
-    # Z-based tap detection parameters (calibrated for reference hand size)
-    TAP_BASE_DELTA = 0.025          # Base z delta vs baseline to start a press
-    TAP_NOISE_MULT = 3.0            # Multiplier on median |dz| to raise threshold in noise
-    TAP_MIN_VEL = 0.2               # Min negative z velocity to start a press
-    TAP_RELEASE_VEL = 0.15          # Min positive z velocity to consider release
-    TAP_MIN_DURATION = 0.05         # Minimum tap duration (seconds)
-    TAP_MAX_DURATION = 0.50         # Maximum tap duration (seconds)
-    TAP_MIN_INTERVAL = 0.05         # Minimum interval between taps (seconds)
-    TAP_MAX_INTERVAL = 1.00         # Maximum interval between taps (seconds)
+    # ==================== Z-Depth Tap Detection ====================
+    # Primary method: detects taps based on fingertip Z-coordinate changes
+    # All thresholds marked (SCALED) are adjusted based on hand size
+    
+    # Press detection thresholds
+    TAP_BASE_DELTA = 0.025          # Base z delta vs baseline to start a press (SCALED)
+    TAP_NOISE_MULT = 3.0            # Multiplier on median |dz| to raise threshold in noisy conditions
+    TAP_MIN_VEL = 0.2               # Min negative z velocity to start a press (SCALED, inward motion)
+    
+    # Release detection thresholds
+    TAP_RELEASE_VEL = 0.15          # Min positive z velocity to consider release (outward motion)
+    TAP_MAX_RELEASE_BACK = 0.45     # Fraction of press depth required for release (0.45 = 45% return)
+    
+    # Temporal constraints
+    TAP_MIN_DURATION = 0.05         # Minimum tap duration in seconds (reject accidental touches)
+    TAP_MAX_DURATION = 0.50         # Maximum tap duration in seconds (reject prolonged presses)
+    TAP_MIN_INTERVAL = 0.05         # Minimum interval between taps in seconds (debounce)
+    TAP_MAX_INTERVAL = 1.00         # Maximum interval for double-tap recognition in seconds
+    
+    # Spatial constraints
     TAP_MIN_PRESS_DEPTH = 0.010     # Minimal press depth needed to consider a tap (SCALED)
-    TAP_MAX_XY_DRIFT = 180.0        # Maximum XY drift during a tap (SCALED)
-    TAP_MAX_RELEASE_BACK = 0.45     # Fraction of press depth required for release
+    TAP_MAX_XY_DRIFT = 180.0        # Maximum XY drift during a tap in pixels (SCALED)
+    
+    # History buffer sizes for robust baseline computation
+    Z_HISTORY_LEN = 7               # Number of frames to track Z-coordinate history
+    XY_HISTORY_LEN = 7              # Number of frames to track XY-position history
 
-    # History buffer sizes
-    Z_HISTORY_LEN = 7
-    XY_HISTORY_LEN = 7
+    # Cooldown periods to prevent rapid re-triggering
+    TAP_COOLDOWN = 0.7              # Cooldown after double-tap detection (seconds)
+    DOUBLE_TAP_COOLDOWN_MAIN = 0.7  # Main cooldown period (seconds)
 
-    # Cooldown period after double-tap detection (seconds)
-    TAP_COOLDOWN = 0.7
-    DOUBLE_TAP_COOLDOWN_MAIN = 0.7
+    # ==================== Angle-Based Tap Detection ====================
+    # Secondary method: detects taps based on finger flexion angle at DIP joint
+    # Useful for detecting taps when Z-depth is unreliable
+    
+    ANG_HISTORY_LEN = 7             # Number of frames to track angle history
+    
+    # Press detection thresholds
+    ANG_BASE_DELTA = 12.0           # Min angle rise above baseline to start a press in degrees (SCALED)
+    ANG_NOISE_MULT = 3.0            # Noise-adaptive margin multiplier
+    ANG_MIN_VEL = 120.0             # Deg/s minimum rising angular velocity (finger closing)
+    
+    # Release detection thresholds
+    ANG_RELEASE_VEL = -120.0        # Deg/s negative velocity for release (finger opening)
+    ANG_MIN_PRESS_DEPTH = 10.0      # Degrees min peak flexion over baseline (SCALED)
+    ANG_RELEASE_BACK = 0.5          # Fraction of peak angle to return for release (50%)
 
-    # Angle-based distal flexion thresholds (degrees)
-    ANG_HISTORY_LEN = 7
-    ANG_BASE_DELTA = 12.0           # Min angle rise above baseline to start a press (SCALED)
-    ANG_NOISE_MULT = 3.0            # Noise-adaptive margin
-    ANG_MIN_VEL = 120.0             # Deg/s minimum rising angular velocity
-    ANG_RELEASE_VEL = -120.0        # Deg/s negative velocity (falling) for release
-    ANG_MIN_PRESS_DEPTH = 10.0      # Degrees (min peak flexion over baseline) (SCALED)
-    ANG_RELEASE_BACK = 0.5          # Fraction of peak angle to return for release
+    # ==================== Enhanced Detection Parameters ====================
+    # Used by PoseDetectorMPEnhanced for higher-precision tap detection
+    # Combines multiple geometric and kinematic signals for robust detection
+    
+    # Palm plane penetration detection (signed distance from tip to palm plane)
+    PLANE_BASE_DELTA = 0.010        # Base threshold for plane penetration (SCALED)
+    PLANE_NOISE_MULT = 4.0          # Noise multiplier for adaptive threshold
+    PLANE_MIN_PRESS_DEPTH = 0.008   # Minimum penetration depth for valid tap (SCALED)
+    PLANE_RELEASE_BACK = 0.45       # Fraction of depth to return for release (45%)
 
-    # Enhanced detection parameters (used by PoseDetectorMPEnhanced)
-    # Palm plane penetration (signed distance) thresholds
-    PLANE_BASE_DELTA = 0.010        # (SCALED)
-    PLANE_NOISE_MULT = 4.0
-    PLANE_MIN_PRESS_DEPTH = 0.008   # (SCALED)
-    PLANE_RELEASE_BACK = 0.45
+    # Relative depth detection (tip Z relative to palm center Z)
+    ZREL_BASE_DELTA = 0.010         # Base threshold for relative depth change (SCALED)
+    ZREL_NOISE_MULT = 4.0           # Noise multiplier for adaptive threshold
+    ZREL_MIN_PRESS_DEPTH = 0.010    # Minimum relative depth change for valid tap (SCALED)
 
-    # Relative depth (tip Z relative to palm) thresholds
-    ZREL_BASE_DELTA = 0.010         # (SCALED)
-    ZREL_NOISE_MULT = 4.0
-    ZREL_MIN_PRESS_DEPTH = 0.010    # (SCALED)
+    # Temporal smoothing via Exponential Moving Average
+    EWMA_ALPHA = 0.35               # Smoothing factor (0.35 = 35% new, 65% old) - reduces jitter
 
-    # Temporal smoothing (EMA)
-    EWMA_ALPHA = 0.35
+    # Motion stability gates (prevent false positives during hand movement)
+    STABLE_XY_VEL_MAX = 50.0        # Maximum XY velocity for stable hand (px/s)
+    STABLE_ROT_MAX = 0.25           # Maximum palm rotation rate for stable hand (rad/s)
 
-    # Motion stability gates
-    STABLE_XY_VEL_MAX = 50.0        # px/s
-    STABLE_ROT_MAX = 0.25           # rad/s
+    # Landmark quality gates (reject low-quality tracking data)
+    MIN_HAND_SCORE = 0.65           # Minimum MediaPipe hand detection confidence (0-1)
+    JITTER_MAX_PX = 3.0             # Maximum landmark jitter in pixels
 
-    # Landmark confidence/jitter gates
-    MIN_HAND_SCORE = 0.65
-    JITTER_MAX_PX = 3.0
+    # Ray-projection velocity (velocity along index finger pointing direction)
+    RAY_MIN_IN_VEL = 0.10           # Minimum inward velocity along finger ray (SCALED, norm units/s)
 
-    # Ray-projection velocity threshold
-    RAY_MIN_IN_VEL = 0.10           # norm units/s (SCALED)
+    # Stronger pointing gesture gate (stricter extension ratio requirements)
+    INDEX_STRONG_MIN = 0.78         # Minimum extension ratio for index finger (0.78 = 78% extended)
+    OTHERS_STRONG_MAX = 0.92        # Maximum extension ratio for other fingers (must be curled)
 
-    # Stronger pointing gate thresholds
-    INDEX_STRONG_MIN = 0.78
-    OTHERS_STRONG_MAX = 0.92
+    # Tiny classifier for final tap validation
+    # Linear classifier weights for engineered features: [zrel_depth, plane_depth, ang_depth, drift, vzrel, vplane, duration]
+    CLS_WEIGHTS = [2.0, 1.2, 1.0, -0.8, -0.9, -0.4, 0.6]  # Feature weights (positive = tap indicator)
+    CLS_BIAS = -2.0                 # Classifier bias term
+    CLS_MIN_PROB = 0.65             # Minimum probability threshold for tap classification (0-1)
 
-    # Tiny classifier over engineered features
-    # Note: list is fine; implementation will coerce to np.array
-    CLS_WEIGHTS = [2.0, 1.2, 1.0, -0.8, -0.9, -0.4, 0.6]
-    CLS_BIAS = -2.0
-    CLS_MIN_PROB = 0.65
-
-    # Allow taps while not explicitly in a pointing pose
-    ALLOW_TAP_WHILE_MOVING = True
-    # For enhanced detector: require more concurrent triggers when not pointing
-    MOVING_TAP_TRIGGER_COUNT = 3
+    # ==================== Tap While Moving ====================
+    # Allow tap detection even when hand is not in strict pointing pose
+    ALLOW_TAP_WHILE_MOVING = True   # Enable tap detection during non-pointing gestures
+    MOVING_TAP_TRIGGER_COUNT = 3    # Require more concurrent triggers when not pointing (stricter)
 
 
 # ==================== Interaction Policy Configuration ====================
