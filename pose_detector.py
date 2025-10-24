@@ -1,11 +1,29 @@
 """
 MediaPipe-based hand pose detection for Simple CamIO.
 
-This module handles hand tracking, pointing gesture recognition, and tap detection
-using MediaPipe's hand landmark detection.
+This module provides three hand pose detection implementations with progressively
+enhanced tap detection capabilities:
+
+1. PoseDetectorMP (Base)
+   - Basic hand tracking and pointing gesture recognition
+   - Z-depth and finger angle-based tap detection
+   - Hand size adaptive thresholds
+
+2. PoseDetectorMPEnhanced (Enhanced)
+   - All base functionality plus advanced tap detection
+   - Palm plane penetration analysis
+   - Relative depth tracking
+   - Ray-projection velocity
+   - Motion stability gates
+   - Tiny classifier for tap validation
+
+3. CombinedPoseDetector (Fusion)
+   - Runs both base and enhanced detectors
+   - Fuses outputs for maximum reliability
+   - Recommended for production use
 
 HAND SIZE SCALING:
-The tap detection system now adapts thresholds based on hand size (distance from camera).
+All detectors adapt thresholds based on hand size (distance from camera).
 When hands appear smaller (farther from camera), detection becomes MORE sensitive by
 REDUCING thresholds proportionally. This ensures consistent tap detection across all
 distances.
@@ -21,6 +39,19 @@ Scaled parameters include:
 - XY drift allowance (TAP_MAX_XY_DRIFT)
 - Velocity thresholds (TAP_MIN_VEL, RAY_MIN_IN_VEL)
 - Enhanced detection thresholds (PLANE_*, ZREL_*)
+
+USAGE:
+    from pose_detector import CombinedPoseDetector
+    
+    detector = CombinedPoseDetector(model)
+    index_pos, status, img = detector.detect(frame, H, None, draw=True)
+    
+    if status == 'double_tap':
+        # Handle double tap action
+        pass
+    elif status == 'pointing':
+        # Handle pointing gesture
+        pass
 
 """
 
@@ -119,10 +150,14 @@ class PoseDetectorMP:
         """
         Compute hand size metric based on palm width.
         
+        The palm width is calculated as the distance between the index MCP (landmark 5)
+        and pinky MCP (landmark 17) in pixel space. This metric is used to determine
+        the hand's distance from the camera and adjust detection thresholds accordingly.
+        
         Args:
             hand_landmarks: MediaPipe hand landmarks
-            width (int): Image width
-            height (int): Image height
+            width (int): Image width in pixels
+            height (int): Image height in pixels
             
         Returns:
             float: Palm width in pixels (distance between index MCP and pinky MCP)
@@ -144,6 +179,14 @@ class PoseDetectorMP:
         
         For small hands (far from camera), we need MORE sensitive detection,
         which means SMALLER thresholds, so we return a scale factor < 1.0.
+        
+        The scaling is linear between SMALL_HAND_THRESHOLD and REFERENCE_PALM_WIDTH:
+        - Palm width >= REFERENCE_PALM_WIDTH (180px): scale = 1.0 (no scaling)
+        - Palm width <= SMALL_HAND_THRESHOLD (80px): scale = MIN_SCALE_FACTOR (0.35)
+        - In between: linear interpolation
+        
+        This ensures that distant hands (smaller palm width) get proportionally
+        reduced thresholds, making tap detection more sensitive.
         
         Args:
             palm_width (float): Measured palm width in pixels
@@ -169,13 +212,24 @@ class PoseDetectorMP:
         Get scaled thresholds for tap detection based on hand size.
         
         Uses caching to avoid recomputing for each frame when hand size is stable.
+        Thresholds are scaled to maintain consistent tap detection across different
+        hand distances. Velocity thresholds use aggressive scaling because physical
+        tap speed is constant but produces smaller z-velocities when farther away.
         
         Args:
             hand_key (str): Hand identifier ('Left' or 'Right')
             palm_width (float): Current palm width in pixels
             
         Returns:
-            dict: Dictionary of scaled threshold values
+            dict: Dictionary of scaled threshold values including:
+                - scale_factor: Overall scaling factor
+                - velocity_scale: Specialized velocity scaling
+                - tap_base_delta: Scaled Z-depth press threshold
+                - tap_min_press_depth: Scaled minimum press depth
+                - tap_max_xy_drift: Scaled maximum XY drift
+                - tap_min_vel: Scaled minimum velocity threshold
+                - ang_base_delta: Scaled angle press threshold
+                - ang_min_press_depth: Scaled minimum angle press depth
         """
         # Check cache
         cache_entry = self._hand_size_cache.get(hand_key)
@@ -242,6 +296,39 @@ class PoseDetectorMP:
                    movement_status: 'pointing', 'moving', 'double_tap', etc.
                    img_out: Annotated image if draw=True, else None
         """
+        # Step 1: Process image with MediaPipe
+        results = self._process_image_with_mediapipe(image, processing_scale)
+        
+        # Step 2: Cache results for downstream use
+        orig_h, orig_w = image.shape[0], image.shape[1]
+        self._cache_mediapipe_results(results, orig_w, orig_h)
+        
+        # Step 3: Initialize output variables
+        img_out = image.copy() if draw else None
+        index_pos = None
+        movement_status = None
+        
+        # Step 4: Process detected hands
+        if results.multi_hand_landmarks:
+            index_pos, movement_status = self._process_detected_hands(
+                results, orig_w, orig_h, H, draw, img_out
+            )
+        
+        # Step 5: Normalize and return results
+        normalized = self._normalize_index_position(index_pos)
+        return normalized, movement_status, img_out
+    
+    def _process_image_with_mediapipe(self, image, processing_scale):
+        """
+        Process image with MediaPipe hand tracking.
+        
+        Args:
+            image (numpy.ndarray): Input camera frame
+            processing_scale (float): Scale factor for processing
+            
+        Returns:
+            MediaPipe results object
+        """
         # Downscale image for faster processing
         if processing_scale < 1.0:
             small = cv.resize(image, (0, 0), fx=processing_scale, fy=processing_scale,
@@ -251,72 +338,113 @@ class PoseDetectorMP:
 
         # Convert to RGB for MediaPipe (model expects RGB)
         small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
-        # Hint Mediapipe to avoid extra copies
+        
+        # Hint MediaPipe to avoid extra copies
         try:
             small_rgb.flags.writeable = False
         except Exception:
             pass
-        results = self.hands.process(small_rgb)
-
-        # Cache MediaPipe results and original frame dims for reuse
-        orig_h, orig_w = image.shape[0], image.shape[1]
+        
+        return self.hands.process(small_rgb)
+    
+    def _cache_mediapipe_results(self, results, orig_w, orig_h):
+        """
+        Cache MediaPipe results and frame dimensions for reuse.
+        
+        Args:
+            results: MediaPipe hand tracking results
+            orig_w (int): Original image width
+            orig_h (int): Original image height
+        """
         self._last_mp_results = results
         self._last_frame_dims = (orig_w, orig_h)
-
-        img_out = image.copy() if draw else None
+    
+    def _process_detected_hands(self, results, orig_w, orig_h, H, draw, img_out):
+        """
+        Process all detected hands and extract gesture information.
+        
+        Args:
+            results: MediaPipe hand tracking results
+            orig_w (int): Original image width
+            orig_h (int): Original image height
+            H (numpy.ndarray): Homography matrix
+            draw (bool): Whether to draw landmarks
+            img_out (numpy.ndarray): Output image for drawing
+            
+        Returns:
+            tuple: (index_pos, movement_status)
+        """
         index_pos = None
         movement_status = None
-        double_tap_emitted = False
-
-        if results.multi_hand_landmarks:
-            # use cached dims above
-            orig_h, orig_w = self._last_frame_dims
-
-            for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                # Get hand label ('Left' or 'Right') for stable tracking
-                handedness = MessageToDict(results.multi_handedness[h])['classification'][0]['label']
-                hand_key = handedness
-
-                # Detect pointing gesture
-                is_pointing = self._detect_pointing_gesture(hand_landmarks, orig_w, orig_h)
-
-                # Draw hand landmarks if requested
-                if draw:
-                    self._draw_hand_landmarks(img_out, hand_landmarks)
-
-                # Get index finger tip position
-                pos_x, pos_y, position = self._get_finger_position(
-                    hand_landmarks, 8, orig_w, orig_h, H
+        
+        for h, hand_landmarks in enumerate(results.multi_hand_landmarks):
+            # Get hand identifier for state tracking
+            hand_key = self._get_hand_key(results, h)
+            
+            # Detect pointing gesture
+            is_pointing = self._detect_pointing_gesture(hand_landmarks, orig_w, orig_h)
+            
+            # Draw hand landmarks if requested
+            if draw:
+                self._draw_hand_landmarks(img_out, hand_landmarks)
+            
+            # Extract index finger position
+            pos_x, pos_y, position = self._get_finger_position(
+                hand_landmarks, 8, orig_w, orig_h, H
+            )
+            
+            # Update index position (first hand only)
+            if index_pos is None:
+                index_pos = self._compute_normalized_position(position)
+            
+            # Update movement status
+            if movement_status != 'double_tap':
+                movement_status = self._update_movement_status(
+                    hand_landmarks, is_pointing, index_pos, position, movement_status
                 )
-                # position is homogeneous: [x', y', w'] = H * [x, y, 1]
-                # Normalize by w' to get metric coordinates in the map/model plane.
-                if index_pos is None:
-                    index_pos = np.array([
-                        position[0] / position[2],  # x' / w'
-                        position[1] / position[2],  # y' / w'
-                        0                            # z reserved; not used in current pipeline
-                    ], dtype=float)
-
-                # Update movement status based on pointing gesture
-                if movement_status != 'double_tap':
-                    movement_status = self._update_movement_status(
-                        hand_landmarks, is_pointing, index_pos, position, movement_status
-                    )
-
-                # Detect taps (single and double)
-                tap_detected = self._detect_taps(
-                    hand_landmarks, hand_key, is_pointing, pos_x, pos_y,
-                    orig_w, orig_h, draw, img_out
-                )
-
-                if tap_detected:
-                    movement_status = 'double_tap'
-                    double_tap_emitted = True
-                    break
-
-        # Normalize index position to always return proper format
-        normalized = self._normalize_index_position(index_pos)
-        return normalized, movement_status, img_out
+            
+            # Detect taps (single and double)
+            tap_detected = self._detect_taps(
+                hand_landmarks, hand_key, is_pointing, pos_x, pos_y,
+                orig_w, orig_h, draw, img_out
+            )
+            
+            # Double tap overrides other statuses
+            if tap_detected:
+                movement_status = 'double_tap'
+                break
+        
+        return index_pos, movement_status
+    
+    def _get_hand_key(self, results, hand_index):
+        """
+        Extract hand identifier from MediaPipe results.
+        
+        Args:
+            results: MediaPipe hand tracking results
+            hand_index (int): Index of hand in results
+            
+        Returns:
+            str: Hand identifier ('Left' or 'Right')
+        """
+        handedness = MessageToDict(results.multi_handedness[hand_index])
+        return handedness['classification'][0]['label']
+    
+    def _compute_normalized_position(self, position):
+        """
+        Compute normalized position from homography-transformed coordinates.
+        
+        Args:
+            position (numpy.ndarray): Homogeneous coordinates [x', y', w']
+            
+        Returns:
+            numpy.ndarray: Normalized 3D position [x, y, z]
+        """
+        return np.array([
+            position[0] / position[2],  # x' / w'
+            position[1] / position[2],  # y' / w'
+            0                            # z reserved; not used in current pipeline
+        ], dtype=float)
 
     def _detect_pointing_gesture(self, hand_landmarks, width, height):
         """
@@ -385,7 +513,7 @@ class PoseDetectorMP:
         lm = hand_landmarks.landmark[landmark_idx]
         pos_x = lm.x * width
         pos_y = lm.y * height
-        # Homography (3x3) maps image pixel [x, y, 1] to map plane [x', y', w'].
+        # Homography (3x3) maps image pixel [x, y, 1] to map plane [x', y', y'].
         # The caller must divide by w' to get in-plane coordinates.
         position = np.matmul(H, np.array([pos_x, pos_y, 1]))
         return pos_x, pos_y, position
@@ -434,33 +562,41 @@ class PoseDetectorMP:
         """
         Detect single and double taps using Z-depth and finger angle analysis.
 
+        Args:
+            hand_landmarks: MediaPipe hand landmarks
+            hand_key (str): Hand identifier ('Left' or 'Right')
+            is_pointing (bool): Whether hand is in pointing pose
+            pos_x (float): X position of fingertip
+            pos_y (float): Y position of fingertip
+            width (int): Image width
+            height (int): Image height
+            draw (bool): Whether to draw annotations
+            img_out (numpy.ndarray): Output image for drawing
+
         Returns:
             bool: True if double tap detected
         """
         try:
+            # Get current frame data
             now = time.time()
             lm8_z = float(hand_landmarks.landmark[8].z)
+            angle_deg = self._compute_finger_flexion_angle(hand_landmarks, width, height)
 
-            # Compute hand size and get scaled thresholds
+            # Get hand size and scaled thresholds
             palm_width = self._compute_hand_size(hand_landmarks, width, height)
             thresholds = self._get_scaled_thresholds(hand_key, palm_width)
-
-            # Compute distal flexion angle at index DIP
-            angle_deg = self._compute_finger_flexion_angle(hand_landmarks, width, height)
 
             # Get or create tap state for this hand
             state = self._get_tap_state(hand_key, lm8_z, angle_deg, pos_x, pos_y, now)
 
-            # Update histories used for robust baselines
-            state['z_history'].append(lm8_z)
-            state['xy_history'].append((pos_x, pos_y))
-            state['ang_history'].append(angle_deg)
+            # Update state histories
+            self._update_tap_histories(state, lm8_z, angle_deg, pos_x, pos_y)
 
-            # Calculate baselines (median) and noise (median of |diff|)
+            # Calculate baselines and noise levels
             baseline_z, noise_z, dz_press = self._calculate_z_baseline(state, thresholds)
             baseline_ang, noise_ang, dang_press = self._calculate_angle_baseline(state, thresholds)
 
-            # Velocities (per second); dt protected from 0 by 1e-3
+            # Calculate velocities
             dt = max(1e-3, now - state['prev_ts'])
             vz = (lm8_z - state['prev_z']) / dt         # inward is negative in MP z
             vang = (angle_deg - state['prev_angle']) / dt  # positive when closing
@@ -476,15 +612,42 @@ class PoseDetectorMP:
                                                  vang, pos_x, pos_y, draw, img_out, thresholds)
 
             # Update state for next frame
-            state['prev_z'] = lm8_z
-            state['prev_ts'] = now
-            state['prev_angle'] = angle_deg
+            self._update_tap_state_for_next_frame(state, now, lm8_z, angle_deg)
 
             return double_tap
 
         except Exception as e:
             logger.debug(f"Error in tap detection: {e}")
             return False
+
+    def _update_tap_histories(self, state, lm8_z, angle_deg, pos_x, pos_y):
+        """
+        Update history buffers used for robust baseline computation.
+        
+        Args:
+            state (dict): Tap state dictionary
+            lm8_z (float): Z-coordinate of fingertip
+            angle_deg (float): Flexion angle in degrees
+            pos_x (float): X position of fingertip
+            pos_y (float): Y position of fingertip
+        """
+        state['z_history'].append(lm8_z)
+        state['xy_history'].append((pos_x, pos_y))
+        state['ang_history'].append(angle_deg)
+
+    def _update_tap_state_for_next_frame(self, state, now, lm8_z, angle_deg):
+        """
+        Update tap state variables for the next frame.
+        
+        Args:
+            state (dict): Tap state dictionary
+            now (float): Current timestamp
+            lm8_z (float): Z-coordinate of fingertip
+            angle_deg (float): Flexion angle in degrees
+        """
+        state['prev_z'] = lm8_z
+        state['prev_ts'] = now
+        state['prev_angle'] = angle_deg
 
     def _compute_finger_flexion_angle(self, hand_landmarks, width, height):
         """Compute the flexion angle of the index finger distal joint."""
@@ -531,19 +694,55 @@ class PoseDetectorMP:
         return self._tap_state[hand_key]
 
     def _calculate_z_baseline(self, state, thresholds):
-        """Calculate Z-depth baseline and noise-adaptive threshold."""
+        """
+        Calculate Z-depth baseline and noise-adaptive threshold.
+        
+        Uses robust median-based estimation to handle outliers. The baseline represents
+        the "resting" Z-coordinate of the fingertip, while noise estimation captures
+        frame-to-frame jitter for adaptive thresholding.
+        
+        Args:
+            state (dict): Tap state dictionary with z_history
+            thresholds (dict): Scaled thresholds dictionary
+            
+        Returns:
+            tuple: (baseline_z, noise_z, dz_press)
+                - baseline_z: Median Z-coordinate from history (robust center)
+                - noise_z: Median absolute frame-to-frame difference (jitter estimate)
+                - dz_press: Adaptive threshold for press detection
+        """
         z_hist = list(state['z_history'])
-        baseline_z = np.median(z_hist) if len(z_hist) >= 3 else state['prev_z']  # robust center
-        dz_abs = np.abs(np.diff(z_hist)) if len(z_hist) >= 2 else np.array([0.0])  # frame-to-frame jitter
-        noise_z = float(np.median(dz_abs)) if dz_abs.size > 0 else 0.0            # robust noise estimate
+        # Robust center estimate using median (resistant to outliers)
+        baseline_z = np.median(z_hist) if len(z_hist) >= 3 else state['prev_z']
+        # Robust jitter estimate using median of absolute differences
+        dz_abs = np.abs(np.diff(z_hist)) if len(z_hist) >= 2 else np.array([0.0])
+        noise_z = float(np.median(dz_abs)) if dz_abs.size > 0 else 0.0
         # Use scaled BASE_DELTA for better sensitivity with small hands
+        # Increase threshold in noisy conditions (NOISE_MULT * jitter)
         dz_press = max(thresholds['tap_base_delta'], self.TAP_NOISE_MULT * noise_z)
         return baseline_z, noise_z, dz_press
 
     def _calculate_angle_baseline(self, state, thresholds):
-        """Calculate angle baseline and noise-adaptive threshold."""
+        """
+        Calculate angle baseline and noise-adaptive threshold.
+        
+        Similar to Z-baseline but for finger flexion angle at the DIP joint.
+        Uses robust statistics to handle tracking noise.
+        
+        Args:
+            state (dict): Tap state dictionary with ang_history
+            thresholds (dict): Scaled thresholds dictionary
+            
+        Returns:
+            tuple: (baseline_ang, noise_ang, dang_press)
+                - baseline_ang: Median angle from history (robust center)
+                - noise_ang: Median absolute frame-to-frame angle change
+                - dang_press: Adaptive threshold for angle-based press detection
+        """
         ang_hist = list(state['ang_history'])
+        # Robust center estimate
         baseline_ang = np.median(ang_hist) if len(ang_hist) >= 3 else state['prev_angle']
+        # Robust noise estimate
         dang_abs = np.abs(np.diff(ang_hist)) if len(ang_hist) >= 2 else np.array([0.0])
         noise_ang = float(np.median(dang_abs)) if dang_abs.size > 0 else 0.0
         # Use scaled ANG_BASE_DELTA for better sensitivity with small hands
@@ -594,91 +793,225 @@ class PoseDetectorMP:
 
     def _check_tap_release(self, state, now, lm8_z, vz, angle_deg, vang,
                           pos_x, pos_y, draw, img_out, thresholds):
-        """Check if a press should be released and if it forms a (double) tap."""
+        """
+        Check if a press should be released and if it forms a (double) tap.
+        
+        Args:
+            state (dict): Tap state dictionary
+            now (float): Current timestamp
+            lm8_z (float): Current Z-coordinate
+            vz (float): Z-velocity
+            angle_deg (float): Current flexion angle
+            vang (float): Angular velocity
+            pos_x (float): Current X position
+            pos_y (float): Current Y position
+            draw (bool): Whether to draw annotations
+            img_out (numpy.ndarray): Output image
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if double tap detected
+        """
         if not state['pressing']:
             return False
 
         # Update peak values (deepest press and max angle)
+        self._update_press_peaks(state, lm8_z, angle_deg)
+
+        # Check if release conditions are met
+        if self._should_release_press(state, now, lm8_z, vz, angle_deg, vang, thresholds):
+            return self._handle_press_release(state, now, pos_x, pos_y, draw, img_out, thresholds)
+
+        return False
+
+    def _update_press_peaks(self, state, lm8_z, angle_deg):
+        """
+        Update peak depth and angle values during a press.
+        
+        Args:
+            state (dict): Tap state dictionary
+            lm8_z (float): Current Z-coordinate
+            angle_deg (float): Current flexion angle
+        """
         if lm8_z < state['min_z']:
             state['min_z'] = lm8_z
         state['peak_depth'] = max(state['peak_depth'],
-                                 state['start_baseline'] - state['min_z'])  # depth from baseline
+                                 state['start_baseline'] - state['min_z'])
 
         if angle_deg > state['max_angle']:
             state['max_angle'] = angle_deg
         state['peak_angle_depth'] = max(state['peak_angle_depth'],
                                        state['max_angle'] - state['start_baseline_angle'])
 
-        # Release when sufficient "back-out" or velocity reversal or timeout
+    def _should_release_press(self, state, now, lm8_z, vz, angle_deg, vang, thresholds):
+        """
+        Determine if press should be released based on movement and timing.
+        
+        Args:
+            state (dict): Tap state dictionary
+            now (float): Current timestamp
+            lm8_z (float): Current Z-coordinate
+            vz (float): Z-velocity
+            angle_deg (float): Current flexion angle
+            vang (float): Angular velocity
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if press should be released
+        """
+        # Check Z-depth release conditions
         depth_z = max(0.0, state['peak_depth'])
-        back_z = lm8_z - state['min_z']  # how much tip returned from deepest point
-        # Use scaled threshold for minimum press depth
+        back_z = lm8_z - state['min_z']
         enough_back_z = ((depth_z >= thresholds['tap_min_press_depth']) and
                         (back_z >= self.TAP_MAX_RELEASE_BACK * depth_z))
         velocity_release_z = ((vz >= self.TAP_RELEASE_VEL) and
                              ((now - state['press_start']) >= self.TAP_MIN_DURATION))
 
+        # Check angle release conditions
         depth_ang = max(0.0, state['peak_angle_depth'])
-        back_ang = state['max_angle'] - angle_deg  # angle opened back
-        # Use scaled threshold for minimum angle press depth
+        back_ang = state['max_angle'] - angle_deg
         enough_back_ang = ((depth_ang >= thresholds['ang_min_press_depth']) and
                           (back_ang >= self.ANG_RELEASE_BACK * depth_ang))
         velocity_release_ang = ((vang <= self.ANG_RELEASE_VEL) and
                                ((now - state['press_start']) >= self.TAP_MIN_DURATION))
 
+        # Check timeout condition
         too_long = (now - state['press_start'] > self.TAP_MAX_DURATION)
 
-        if (enough_back_z or velocity_release_z or enough_back_ang or
-            velocity_release_ang or too_long):
+        return (enough_back_z or velocity_release_z or enough_back_ang or
+                velocity_release_ang or too_long)
 
-            press_duration = now - state['press_start']
-            sx, sy = state['press_start_xy']
-            xy_drift = float(np.hypot(pos_x - sx, pos_y - sy))  # Euclidean drift during press
+    def _handle_press_release(self, state, now, pos_x, pos_y, draw, img_out, thresholds):
+        """
+        Handle press release and check if it forms a valid tap.
+        
+        Args:
+            state (dict): Tap state dictionary
+            now (float): Current timestamp
+            pos_x (float): Current X position
+            pos_y (float): Current Y position
+            draw (bool): Whether to draw annotations
+            img_out (numpy.ndarray): Output image
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if double tap detected
+        """
+        press_duration = now - state['press_start']
+        sx, sy = state['press_start_xy']
+        xy_drift = float(np.hypot(pos_x - sx, pos_y - sy))
 
-            # Validate tap with duration, drift, and sufficient excursion in depth or angle
-            # Use scaled thresholds for validation
-            valid_tap = ((press_duration >= self.TAP_MIN_DURATION) and
-                        (xy_drift <= thresholds['tap_max_xy_drift']) and
-                        ((depth_z >= thresholds['tap_min_press_depth']) or
-                         (depth_ang >= thresholds['ang_min_press_depth'])))
+        depth_z = max(0.0, state['peak_depth'])
+        depth_ang = max(0.0, state['peak_angle_depth'])
 
-            if valid_tap:
-                logger.info(f"Tap detected: duration={press_duration:.3f}s, "
-                          f"depth={depth_z:.4f}, angleDepth={depth_ang:.1f}, "
-                          f"drift={xy_drift:.1f}, scale={thresholds['scale_factor']:.2f}, "
-                          f"velScale={thresholds.get('velocity_scale', 1.0):.2f}, "
-                          f"palmWidth={thresholds['palm_width']:.1f}px")
+        # Validate tap with duration, drift, and sufficient excursion
+        valid_tap = self._is_valid_tap(press_duration, xy_drift, depth_z, depth_ang, thresholds)
 
-                last_tap = state.get('last_tap', 0.0)
-                gap = now - last_tap if last_tap > 0.0 else 1e9
-
-                # Double tap if gap between taps fits in interval and not in cooldown
-                if ((last_tap > 0.0) and
-                    (self.TAP_MIN_INTERVAL <= gap <= self.TAP_MAX_INTERVAL) and
-                    (now >= state.get('cooldown_until', 0.0))):
-
-                    logger.info(f"Double tap detected! Interval={gap:.3f}s")
-
-                    if draw and img_out is not None:
-                        cv.putText(img_out, "DOUBLE TAP",
-                                 (int(pos_x), int(pos_y) - 10),
-                                 cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-                    state['pressing'] = False
-                    state['last_tap'] = 0.0
-                    state['cooldown_until'] = now + self.TAP_COOLDOWN
-                    state['z_history'].clear()
-                    state['xy_history'].clear()
-                    state['ang_history'].clear()
-
-                    return True
-                else:
-                    state['last_tap'] = now
-                    state['pressing'] = False
-            else:
-                state['pressing'] = False
+        if valid_tap:
+            return self._process_valid_tap(state, now, pos_x, pos_y, press_duration,
+                                          depth_z, depth_ang, xy_drift, draw, img_out, thresholds)
+        else:
+            state['pressing'] = False
 
         return False
+
+    def _is_valid_tap(self, duration, drift, depth_z, depth_ang, thresholds):
+        """
+        Check if press qualifies as a valid tap.
+        
+        Args:
+            duration (float): Press duration in seconds
+            drift (float): XY drift during press in pixels
+            depth_z (float): Z-depth of press
+            depth_ang (float): Angle depth of press
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if tap is valid
+        """
+        return ((duration >= self.TAP_MIN_DURATION) and
+                (drift <= thresholds['tap_max_xy_drift']) and
+                ((depth_z >= thresholds['tap_min_press_depth']) or
+                 (depth_ang >= thresholds['ang_min_press_depth'])))
+
+    def _process_valid_tap(self, state, now, pos_x, pos_y, duration,
+                          depth_z, depth_ang, drift, draw, img_out, thresholds):
+        """
+        Process a valid tap and check for double-tap.
+        
+        Args:
+            state (dict): Tap state dictionary
+            now (float): Current timestamp
+            pos_x (float): Current X position
+            pos_y (float): Current Y position
+            duration (float): Tap duration
+            depth_z (float): Z-depth of press
+            depth_ang (float): Angle depth of press
+            drift (float): XY drift during press
+            draw (bool): Whether to draw annotations
+            img_out (numpy.ndarray): Output image
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if double tap detected
+        """
+        logger.info(f"Tap detected: duration={duration:.3f}s, "
+                  f"depth={depth_z:.4f}, angleDepth={depth_ang:.1f}, "
+                  f"drift={drift:.1f}, scale={thresholds['scale_factor']:.2f}, "
+                  f"velScale={thresholds.get('velocity_scale', 1.0):.2f}, "
+                  f"palmWidth={thresholds['palm_width']:.1f}px")
+
+        last_tap = state.get('last_tap', 0.0)
+        gap = now - last_tap if last_tap > 0.0 else 1e9
+
+        # Check for double tap
+        if self._is_double_tap(state, now, last_tap, gap):
+            logger.info(f"Double tap detected! Interval={gap:.3f}s")
+
+            if draw and img_out is not None:
+                cv.putText(img_out, "DOUBLE TAP",
+                         (int(pos_x), int(pos_y) - 10),
+                         cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            self._reset_tap_state_after_double_tap(state, now)
+            return True
+        else:
+            state['last_tap'] = now
+            state['pressing'] = False
+
+        return False
+
+    def _is_double_tap(self, state, now, last_tap, gap):
+        """
+        Check if tap qualifies as a double tap.
+        
+        Args:
+            state (dict): Tap state dictionary
+            now (float): Current timestamp
+            last_tap (float): Timestamp of last tap
+            gap (float): Time gap between taps
+            
+        Returns:
+            bool: True if double tap detected
+        """
+        return ((last_tap > 0.0) and
+                (self.TAP_MIN_INTERVAL <= gap <= self.TAP_MAX_INTERVAL) and
+                (now >= state.get('cooldown_until', 0.0)))
+
+    def _reset_tap_state_after_double_tap(self, state, now):
+        """
+        Reset tap state after double-tap detection.
+        
+        Args:
+            state (dict): Tap state dictionary
+            now (float): Current timestamp
+        """
+        state['pressing'] = False
+        state['last_tap'] = 0.0
+        state['cooldown_until'] = now + self.TAP_COOLDOWN
+        state['z_history'].clear()
+        state['xy_history'].clear()
+        state['ang_history'].clear()
 
     def _draw_hand_landmarks(self, image, hand_landmarks):
         """Draw hand landmarks on the image."""
@@ -960,217 +1293,603 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
     # ---------- Enhanced tap detection ----------
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
-        """Run base detect, compute enhanced signals, and fuse for safer outputs."""
-        # Use cached base outputs when used in combination wrapper to avoid double-processing
+        """
+        Run base detect, compute enhanced signals, and fuse for safer outputs.
+        
+        This method processes hand landmarks using enhanced detection algorithms
+        that combine multiple signals (Z-depth, palm plane penetration, relative
+        depth, ray projection) for more robust tap detection.
+        
+        Args:
+            image (numpy.ndarray): Input camera frame
+            H (numpy.ndarray): Homography matrix
+            _ : Unused parameter (kept for compatibility)
+            processing_scale (float): Scale factor for processing
+            draw (bool): Whether to draw annotations
+            
+        Returns:
+            tuple: (final_pos, final_status, final_img)
+                - final_pos: Normalized finger position or None
+                - final_status: 'double_tap', 'pointing', 'moving', or None
+                - final_img: Annotated image if draw=True, else None
+        """
+        # Use cached base outputs when used in combination wrapper
+        base_index_pos, base_status, base_img = self._get_base_outputs()
+        
+        # Get or process MediaPipe results
+        results, ow, oh = self._get_mediapipe_results(image, processing_scale)
+        
+        # Process hands with enhanced detection
+        img_out = image.copy() if draw else None
+        index_pos, movement_status = self._process_hands_enhanced(
+            results, ow, oh, H, draw, img_out
+        )
+        
+        # Fuse base and enhanced outputs
+        return self._fuse_detection_outputs(
+            index_pos, movement_status, img_out,
+            base_index_pos, base_status, base_img, draw
+        )
+    
+    def _get_base_outputs(self):
+        """
+        Get cached base detector outputs if available.
+        
+        Returns:
+            tuple: (base_index_pos, base_status, base_img)
+        """
         if getattr(self, "_skip_super", False) and hasattr(self, "_base_cache"):
-            base_index_pos, base_status, base_img = self._base_cache
+            return self._base_cache
         else:
-            base_index_pos, base_status, base_img = super().detect(image, H, _, processing_scale, draw)
-
-        # If CombinedPoseDetector provided MP results, use them; otherwise, process once here
-        results = None
-        ow = oh = None
+            # Will process with MediaPipe later
+            return None, None, None
+    
+    def _get_mediapipe_results(self, image, processing_scale):
+        """
+        Get MediaPipe results from cache or process image.
+        
+        Args:
+            image (numpy.ndarray): Input camera frame
+            processing_scale (float): Scale factor for processing
+            
+        Returns:
+            tuple: (results, orig_w, orig_h)
+        """
+        # Check if CombinedPoseDetector provided results
         provided = getattr(self, "_provided_results", None)
         if provided is not None:
             try:
                 results, ow, oh = provided
+                if results is not None:
+                    return results, ow, oh
             except Exception:
-                results, ow, oh = None, None, None
-
-        if results is None:
-            # No provided results; compute once (fallback)
-            if processing_scale < 1.0:
-                small = cv.resize(image, (0, 0), fx=processing_scale, fy=processing_scale,
-                                  interpolation=cv.INTER_LINEAR)
-            else:
-                small = image
-            small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
-            results = self.hands.process(small_rgb)
-            oh, ow = image.shape[0], image.shape[1]
-
-        img_out = image.copy() if draw else None
+                pass
+        
+        # Process image with MediaPipe (fallback)
+        return self._process_with_mediapipe(image, processing_scale)
+    
+    def _process_with_mediapipe(self, image, processing_scale):
+        """
+        Process image with MediaPipe (fallback when no cached results).
+        
+        Args:
+            image (numpy.ndarray): Input camera frame
+            processing_scale (float): Scale factor for processing
+            
+        Returns:
+            tuple: (results, orig_w, orig_h)
+        """
+        if processing_scale < 1.0:
+            small = cv.resize(image, (0, 0), fx=processing_scale, fy=processing_scale,
+                            interpolation=cv.INTER_LINEAR)
+        else:
+            small = image
+        small_rgb = cv.cvtColor(small, cv.COLOR_BGR2RGB)
+        results = self.hands.process(small_rgb)
+        oh, ow = image.shape[0], image.shape[1]
+        return results, ow, oh
+    
+    def _process_hands_enhanced(self, results, ow, oh, H, draw, img_out):
+        """
+        Process detected hands with enhanced algorithms.
+        
+        Args:
+            results: MediaPipe hand tracking results
+            ow (int): Original image width
+            oh (int): Original image height
+            H (numpy.ndarray): Homography matrix
+            draw (bool): Whether to draw landmarks
+            img_out (numpy.ndarray): Output image for drawing
+            
+        Returns:
+            tuple: (index_pos, movement_status)
+        """
         index_pos = None
         movement_status = None
-
-        if results and results.multi_hand_landmarks:
-            orig_h, orig_w = (oh, ow) if (ow is not None and oh is not None) else (image.shape[0], image.shape[1])
-            for h_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                handedness_msg = MessageToDict(results.multi_handedness[h_idx])['classification'][0]
-                handedness = handedness_msg.get('label', 'Unknown')
-                score = handedness_msg.get('score', None)
-                hand_key = handedness
-
-                # Pointing gate (stronger)
-                is_pointing_base = self._detect_pointing_gesture(hand_landmarks, orig_w, orig_h)
-                is_pointing_strong = self._strong_pointing_gate(hand_landmarks, orig_w, orig_h)
-                is_pointing = is_pointing_base and is_pointing_strong
-
-                if draw:
-                    self._draw_hand_landmarks(img_out, hand_landmarks)
-
-                # Index position (homography transform)
-                pos_x, pos_y, position = self._get_finger_position(hand_landmarks, 8, orig_w, orig_h, H)
-                if index_pos is None:
-                    index_pos = np.array([position[0] / position[2], position[1] / position[2], 0.0], dtype=float)
-
-                # Extra signals
-                angle_deg = self._compute_finger_flexion_angle(hand_landmarks, orig_w, orig_h)
-                plane_d, palm_n = self._plane_signed_distance_tip(hand_landmarks, orig_w, orig_h)
-                zrel = self._relative_tip_depth(hand_landmarks)
-                idx_dir = self._index_dir(hand_landmarks, orig_w, orig_h)
-
-                # Compute hand size and get scaled thresholds
-                palm_width = self._compute_hand_size(hand_landmarks, orig_w, orig_h)
-                thresholds = self._get_enhanced_scaled_thresholds(hand_key, palm_width)
-
-                # Per-hand enhanced state
-                now = time.time()
-                st = self._get_plus_state(hand_key, now, (pos_x, pos_y), zrel, angle_deg, plane_d, palm_n)
-
-                # Temporal smoothing (EMA)
-                st['ema_zrel'] = self._ema(st['ema_zrel'], zrel, self.EWMA_ALPHA)
-                st['ema_ang'] = self._ema(st['ema_ang'], angle_deg, self.EWMA_ALPHA)
-                st['ema_plane'] = self._ema(st['ema_plane'], plane_d, self.EWMA_ALPHA)
-
-                # Histories for baselines
-                st['zrel_hist'].append(st['ema_zrel'])
-                st['plane_hist'].append(st['ema_plane'])
-
-                # Motion stability and confidence gates
-                stable = self._is_motion_stable(st, now, (pos_x, pos_y), palm_n)
-                conf_ok = self._confidence_ok(score, st)
-
-                # Derivatives of smoothed signals
-                dt = max(1e-3, now - st['prev_ts'])
-                vzrel = (st['ema_zrel'] - st['prev_zrel']) / dt
-                vang = (st['ema_ang'] - st['prev_ang']) / dt
-                vplane = (st['ema_plane'] - st['prev_plane']) / dt
-
-                # Ray-projection velocity (along index direction; inward is + via -idx_dir)
-                tip_prev = np.array([st['prev_xy'][0], st['prev_xy'][1], st['prev_zrel']], dtype=float)
-                tip_curr = np.array([pos_x, pos_y, st['ema_zrel']], dtype=float)
-                v_tip = (tip_curr - tip_prev) / dt
-                ray_in_v = float(np.dot(v_tip / (np.linalg.norm(v_tip) + 1e-9), -idx_dir))
-
-                # Baselines and noise-adaptive thresholds (median + robust diffs)
-                base_zrel = self._adaptive_baseline(st['zrel_hist'], st['prev_zrel'])
-                noise_zrel = self._noise_level(st['zrel_hist'])
-                dzrel_press = max(self.ZREL_BASE_DELTA, self.ZREL_NOISE_MULT * noise_zrel)
-
-                base_plane = self._adaptive_baseline(st['plane_hist'], st['prev_plane'])
-                noise_plane = self._noise_level(st['plane_hist'])
-                dplane_press = max(self.PLANE_BASE_DELTA, self.PLANE_NOISE_MULT * noise_plane)
-
-                # Triggers (MP z is more negative toward camera)
-                zrel_press = (base_zrel - st['ema_zrel'] > dzrel_press) and (vzrel <= -thresholds['tap_min_vel'])
-                ang_press = (st['ema_ang'] - st['prev_ang'] > 0) and (vang >= self.ANG_MIN_VEL)
-                plane_press = (base_plane - st['ema_plane'] > dplane_press) and (vplane <= -thresholds['tap_min_vel'])
-                ray_press = (ray_in_v >= thresholds['ray_min_in_vel'])
-
-                # Late fusion with moving support:
-                # - Pointing: need >=2 triggers
-                # - Moving (non-pointing): require stability, confidence, and stronger evidence (>= MOVING_TAP_TRIGGER_COUNT)
-                trigger_count = sum([zrel_press, ang_press, plane_press, ray_press])
-                start_ok_pointing = is_pointing and stable and conf_ok and (trigger_count >= 2)
-                start_ok_moving = (not is_pointing) and getattr(self, 'ALLOW_TAP_WHILE_MOVING', False) and stable and conf_ok and (trigger_count >= getattr(self, 'MOVING_TAP_TRIGGER_COUNT', 3))
-                start_ok = start_ok_pointing or start_ok_moving
-
-                # Start press
-                if (not st['pressing']) and start_ok and now >= st['cooldown_until']:
-                    st['pressing'] = True
-                    st['press_start'] = now
-                    st['press_start_xy'] = np.array([pos_x, pos_y], dtype=float)
-                    st['min_zrel'] = st['ema_zrel']
-                    st['min_plane'] = st['ema_plane']
-                    st['max_ang'] = st['ema_ang']
-                    st['peak_zrel_depth'] = max(0.0, base_zrel - st['ema_zrel'])
-                    st['peak_plane_depth'] = max(0.0, base_plane - st['ema_plane'])
-                    st['peak_ang_depth'] = 0.0
-
-                # Update peaks while pressing
-                if st['pressing']:
-                    st['min_zrel'] = min(st['min_zrel'], st['ema_zrel'])
-                    st['min_plane'] = min(st['min_plane'], st['ema_plane'])
-                    st['max_ang'] = max(st['max_ang'], st['ema_ang'])
-                    st['peak_zrel_depth'] = max(st['peak_zrel_depth'], base_zrel - st['min_zrel'])
-                    st['peak_plane_depth'] = max(st['peak_plane_depth'], base_plane - st['min_plane'])
-                    st['peak_ang_depth'] = max(st['peak_ang_depth'], st['max_ang'] - st['prev_ang'])
-
-                    # Release conditions (consensus of signals or timeout)
-                    back_zrel = st['ema_zrel'] - st['min_zrel']  # amount returned after peak
-                    enough_back_zrel = (st['peak_zrel_depth'] >= thresholds['zrel_min_press_depth']) and (back_zrel >= self.TAP_MAX_RELEASE_BACK * st['peak_zrel_depth'])
-                    vrel_release = (vzrel >= self.TAP_RELEASE_VEL) and ((now - st['press_start']) >= self.TAP_MIN_DURATION)
-
-                    back_plane = st['ema_plane'] - st['min_plane']
-                    enough_back_plane = (st['peak_plane_depth'] >= thresholds['plane_min_press_depth']) and (back_plane >= self.PLANE_RELEASE_BACK * st['peak_plane_depth'])
-                    vplane_release = (vplane >= self.TAP_RELEASE_VEL) and ((now - st['press_start']) >= self.TAP_MIN_DURATION)
-
-                    back_ang = st['max_ang'] - st['ema_ang']
-                    enough_back_ang = (st['peak_ang_depth'] >= thresholds['ang_min_press_depth']) and (back_ang >= self.ANG_RELEASE_BACK * st['peak_ang_depth'])
-                    vang_release = (vang <= self.ANG_RELEASE_VEL) and ((now - st['press_start']) >= self.TAP_MIN_DURATION)
-
-                    too_long = (now - st['press_start'] > self.TAP_MAX_DURATION)
-                    release_votes = sum([enough_back_zrel or vrel_release,
-                                         enough_back_plane or vplane_release,
-                                         enough_back_ang or vang_release])
-
-                    if release_votes >= 2 or too_long:
-                        # Validate tap by duration, XY drift, and peak depth/angle excursion
-                        duration = now - st['press_start']
-                        drift = float(np.hypot(pos_x - st['press_start_xy'][0], pos_y - st['press_start_xy'][1]))
-                        valid_rule = (duration >= self.TAP_MIN_DURATION) and (drift <= thresholds['tap_max_xy_drift']) and (
-                            (st['peak_zrel_depth'] >= thresholds['zrel_min_press_depth']) or
-                            (st['peak_plane_depth'] >= thresholds['plane_min_press_depth']) or
-                            (st['peak_ang_depth'] >= thresholds['ang_min_press_depth'])
-                        )
-
-                        # Tiny classifier over engineered features for final validation
-                        feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
-                                          drift, abs(vzrel), abs(vplane), duration], dtype=float)
-                        prob = self._tiny_cls_prob(feats)
-                        valid = valid_rule and (prob >= self.CLS_MIN_PROB)
-
-                        if valid:
-                            last_tap = st['last_tap']
-                            gap = now - last_tap if last_tap > 0.0 else 1e9
-                            if (last_tap > 0.0) and (self.TAP_MIN_INTERVAL <= gap <= self.TAP_MAX_INTERVAL) and (now >= st['cooldown_until']):
-                                if draw and img_out is not None:
-                                    cv.putText(img_out, "DOUBLE TAP", (int(pos_x), int(pos_y) - 10),
-                                               cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                                st['last_tap'] = 0.0
-                                st['cooldown_until'] = now + self.TAP_COOLDOWN
-                                st['pressing'] = False
-                                movement_status = 'double_tap'
-                                break
-                            else:
-                                st['last_tap'] = now
-                                st['pressing'] = False
-                        else:
-                            st['pressing'] = False
-
-                # Update state for next frame
-                st['prev_ts'] = now
-                st['prev_xy'] = np.array([pos_x, pos_y], dtype=float)
-                st['prev_zrel'] = st['ema_zrel']
-                st['prev_ang'] = st['ema_ang']
-                st['prev_plane'] = st['ema_plane']
-
-                if movement_status != 'double_tap':
-                    movement_status = 'pointing' if is_pointing else 'moving'
-
-        # Normalize and fuse with base outputs
+        
+        if not (results and results.multi_hand_landmarks):
+            return index_pos, movement_status
+        
+        orig_w, orig_h = (ow, oh) if (ow is not None and oh is not None) else (0, 0)
+        
+        for h_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+            # Extract hand metadata
+            hand_key, score = self._extract_hand_metadata(results, h_idx)
+            
+            # Detect pointing gestures
+            is_pointing_base = self._detect_pointing_gesture(hand_landmarks, orig_w, orig_h)
+            is_pointing_strong = self._strong_pointing_gate(hand_landmarks, orig_w, orig_h)
+            is_pointing = is_pointing_base and is_pointing_strong
+            
+            # Draw landmarks
+            if draw:
+                self._draw_hand_landmarks(img_out, hand_landmarks)
+            
+            # Get index position
+            pos_x, pos_y, position = self._get_finger_position(hand_landmarks, 8, orig_w, orig_h, H)
+            if index_pos is None:
+                index_pos = np.array([position[0] / position[2], position[1] / position[2], 0.0], dtype=float)
+            
+            # Compute enhanced signals
+            signals = self._compute_enhanced_signals(hand_landmarks, orig_w, orig_h)
+            
+            # Get hand size and scaled thresholds
+            palm_width = self._compute_hand_size(hand_landmarks, orig_w, orig_h)
+            thresholds = self._get_enhanced_scaled_thresholds(hand_key, palm_width)
+            
+            # Process tap detection
+            tap_detected = self._process_enhanced_tap_detection(
+                hand_key, is_pointing, score, pos_x, pos_y, signals,
+                thresholds, draw, img_out
+            )
+            
+            # Update status
+            if tap_detected:
+                movement_status = 'double_tap'
+                break
+            elif movement_status != 'double_tap':
+                movement_status = 'pointing' if is_pointing else 'moving'
+        
+        return index_pos, movement_status
+    
+    def _extract_hand_metadata(self, results, h_idx):
+        """
+        Extract hand identifier and confidence score.
+        
+        Args:
+            results: MediaPipe results
+            h_idx (int): Hand index
+            
+        Returns:
+            tuple: (hand_key, score)
+        """
+        handedness_msg = MessageToDict(results.multi_handedness[h_idx])['classification'][0]
+        hand_key = handedness_msg.get('label', 'Unknown')
+        score = handedness_msg.get('score', None)
+        return hand_key, score
+    
+    def _compute_enhanced_signals(self, hand_landmarks, w, h):
+        """
+        Compute all enhanced detection signals.
+        
+        Args:
+            hand_landmarks: MediaPipe hand landmarks
+            w (int): Image width
+            h (int): Image height
+            
+        Returns:
+            dict: Dictionary of computed signals
+        """
+        angle_deg = self._compute_finger_flexion_angle(hand_landmarks, w, h)
+        plane_d, palm_n = self._plane_signed_distance_tip(hand_landmarks, w, h)
+        zrel = self._relative_tip_depth(hand_landmarks)
+        idx_dir = self._index_dir(hand_landmarks, w, h)
+        
+        return {
+            'angle_deg': angle_deg,
+            'plane_d': plane_d,
+            'palm_n': palm_n,
+            'zrel': zrel,
+            'idx_dir': idx_dir
+        }
+    
+    def _process_enhanced_tap_detection(self, hand_key, is_pointing, score,
+                                       pos_x, pos_y, signals, thresholds,
+                                       draw, img_out):
+        """
+        Process tap detection with enhanced signals.
+        
+        Args:
+            hand_key (str): Hand identifier
+            is_pointing (bool): Whether hand is pointing
+            score (float): Detection confidence
+            pos_x (float): X position
+            pos_y (float): Y position
+            signals (dict): Computed signals
+            thresholds (dict): Scaled thresholds
+            draw (bool): Whether to draw
+            img_out (numpy.ndarray): Output image
+            
+        Returns:
+            bool: True if double tap detected
+        """
+        now = time.time()
+        
+        # Get or create enhanced state
+        st = self._get_plus_state(
+            hand_key, now, (pos_x, pos_y),
+            signals['zrel'], signals['angle_deg'],
+            signals['plane_d'], signals['palm_n']
+        )
+        
+        # Apply temporal smoothing
+        self._apply_temporal_smoothing(st, signals)
+        
+        # Update histories
+        st['zrel_hist'].append(st['ema_zrel'])
+        st['plane_hist'].append(st['ema_plane'])
+        
+        # Check motion stability and confidence
+        stable = self._is_motion_stable(st, now, (pos_x, pos_y), signals['palm_n'])
+        conf_ok = self._confidence_ok(score, st)
+        
+        # Compute velocities and triggers
+        dt = max(1e-3, now - st['prev_ts'])
+        velocities = self._compute_velocities(st, signals, dt, pos_x, pos_y)
+        triggers = self._evaluate_triggers(st, signals, velocities, thresholds)
+        
+        # Try to start press
+        if self._try_start_enhanced_press(st, is_pointing, stable, conf_ok,
+                                         triggers, now, pos_x, pos_y, signals, thresholds):
+            pass  # Press started
+        
+        # Check for tap release
+        tap_detected = self._check_enhanced_tap_release(
+            st, now, signals, velocities, pos_x, pos_y,
+            draw, img_out, thresholds
+        )
+        
+        # Update state for next frame
+        self._update_enhanced_state(st, now, pos_x, pos_y, signals)
+        
+        return tap_detected
+    
+    def _apply_temporal_smoothing(self, st, signals):
+        """
+        Apply exponential moving average smoothing to signals.
+        
+        Args:
+            st (dict): Enhanced state dictionary
+            signals (dict): Current frame signals
+        """
+        st['ema_zrel'] = self._ema(st['ema_zrel'], signals['zrel'], self.EWMA_ALPHA)
+        st['ema_ang'] = self._ema(st['ema_ang'], signals['angle_deg'], self.EWMA_ALPHA)
+        st['ema_plane'] = self._ema(st['ema_plane'], signals['plane_d'], self.EWMA_ALPHA)
+    
+    def _compute_velocities(self, st, signals, dt, pos_x, pos_y):
+        """
+        Compute all velocity signals.
+        
+        Args:
+            st (dict): Enhanced state
+            signals (dict): Current signals
+            dt (float): Time delta
+            pos_x (float): X position
+            pos_y (float): Y position
+            
+        Returns:
+            dict: Velocity components
+        """
+        vzrel = (st['ema_zrel'] - st['prev_zrel']) / dt
+        vang = (st['ema_ang'] - st['prev_ang']) / dt
+        vplane = (st['ema_plane'] - st['prev_plane']) / dt
+        
+        # Ray-projection velocity
+        tip_prev = np.array([st['prev_xy'][0], st['prev_xy'][1], st['prev_zrel']], dtype=float)
+        tip_curr = np.array([pos_x, pos_y, st['ema_zrel']], dtype=float)
+        v_tip = (tip_curr - tip_prev) / dt
+        ray_in_v = float(np.dot(v_tip / (np.linalg.norm(v_tip) + 1e-9), -signals['idx_dir']))
+        
+        return {
+            'vzrel': vzrel,
+            'vang': vang,
+            'vplane': vplane,
+            'ray_in_v': ray_in_v
+        }
+    
+    def _evaluate_triggers(self, st, signals, velocities, thresholds):
+        """
+        Evaluate all press triggers.
+        
+        Args:
+            st (dict): Enhanced state
+            signals (dict): Current signals
+            velocities (dict): Velocity components
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            dict: Trigger states
+        """
+        # Compute baselines
+        base_zrel = self._adaptive_baseline(st['zrel_hist'], st['prev_zrel'])
+        noise_zrel = self._noise_level(st['zrel_hist'])
+        dzrel_press = max(self.ZREL_BASE_DELTA, self.ZREL_NOISE_MULT * noise_zrel)
+        
+        base_plane = self._adaptive_baseline(st['plane_hist'], st['prev_plane'])
+        noise_plane = self._noise_level(st['plane_hist'])
+        dplane_press = max(self.PLANE_BASE_DELTA, self.PLANE_NOISE_MULT * noise_plane)
+        
+        # Evaluate triggers
+        zrel_press = (base_zrel - st['ema_zrel'] > dzrel_press) and (velocities['vzrel'] <= -thresholds['tap_min_vel'])
+        ang_press = (st['ema_ang'] - st['prev_ang'] > 0) and (velocities['vang'] >= self.ANG_MIN_VEL)
+        plane_press = (base_plane - st['ema_plane'] > dplane_press) and (velocities['vplane'] <= -thresholds['tap_min_vel'])
+        ray_press = (velocities['ray_in_v'] >= thresholds['ray_min_in_vel'])
+        
+        trigger_count = sum([zrel_press, ang_press, plane_press, ray_press])
+        
+        return {
+            'zrel_press': zrel_press,
+            'ang_press': ang_press,
+            'plane_press': plane_press,
+            'ray_press': ray_press,
+            'trigger_count': trigger_count,
+            'base_zrel': base_zrel,
+            'base_plane': base_plane
+        }
+    
+    def _fuse_detection_outputs(self, index_pos, enhanced_status, img_out,
+                               base_index_pos, base_status, base_img, draw):
+        """
+        Fuse base and enhanced detection outputs.
+        
+        Args:
+            index_pos: Enhanced index position
+            enhanced_status: Enhanced movement status
+            img_out: Enhanced output image
+            base_index_pos: Base index position
+            base_status: Base movement status
+            base_img: Base output image
+            draw (bool): Whether drawing was requested
+            
+        Returns:
+            tuple: (final_pos, final_status, final_img)
+        """
+        # Normalize positions
         normalized = self._normalize_index_position(index_pos)
-        enhanced_status = movement_status
         final_pos = normalized if normalized is not None else base_index_pos
+        
+        # Fuse statuses (double tap takes priority)
         if (base_status == 'double_tap') or (enhanced_status == 'double_tap'):
             final_status = 'double_tap'
         elif (base_status == 'pointing') or (enhanced_status == 'pointing'):
             final_status = 'pointing'
         else:
             final_status = base_status or enhanced_status
+        
+        # Choose output image
         final_img = img_out if (draw and img_out is not None) else base_img
-
+        
         return final_pos, final_status, final_img
+
+    # ---------- Enhanced tap detection helpers ----------
+
+    def _try_start_enhanced_press(self, st, is_pointing, stable, conf_ok, triggers,
+                                   now, pos_x, pos_y, signals, thresholds):
+        """
+        Try to start an enhanced press based on multiple triggers.
+        
+        Args:
+            st (dict): Enhanced state dictionary
+            is_pointing (bool): Whether hand is pointing
+            stable (bool): Whether hand motion is stable
+            conf_ok (bool): Whether confidence/quality is acceptable
+            triggers (dict): Dictionary of trigger states
+            now (float): Current timestamp
+            pos_x (float): X position
+            pos_y (float): Y position
+            signals (dict): Current signals
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if press started
+        """
+        if st['pressing'] or now < st['cooldown_until']:
+            return False
+        
+        # Determine if start conditions are met
+        # Pointing: need >=2 triggers
+        start_ok_pointing = is_pointing and stable and conf_ok and (triggers['trigger_count'] >= 2)
+        
+        # Moving (non-pointing): require stability, confidence, and stronger evidence
+        start_ok_moving = (not is_pointing) and getattr(self, 'ALLOW_TAP_WHILE_MOVING', False) and \
+                         stable and conf_ok and (triggers['trigger_count'] >= getattr(self, 'MOVING_TAP_TRIGGER_COUNT', 3))
+        
+        if start_ok_pointing or start_ok_moving:
+            st['pressing'] = True
+            st['press_start'] = now
+            st['press_start_xy'] = np.array([pos_x, pos_y], dtype=float)
+            st['min_zrel'] = st['ema_zrel']
+            st['min_plane'] = st['ema_plane']
+            st['max_ang'] = st['ema_ang']
+            st['peak_zrel_depth'] = max(0.0, triggers['base_zrel'] - st['ema_zrel'])
+            st['peak_plane_depth'] = max(0.0, triggers['base_plane'] - st['ema_plane'])
+            st['peak_ang_depth'] = 0.0
+            return True
+        
+        return False
+    
+    def _check_enhanced_tap_release(self, st, now, signals, velocities, pos_x, pos_y,
+                                     draw, img_out, thresholds):
+        """
+        Check for enhanced tap release using multiple signals.
+        
+        Args:
+            st (dict): Enhanced state dictionary
+            now (float): Current timestamp
+            signals (dict): Current signals
+            velocities (dict): Velocity components
+            pos_x (float): X position
+            pos_y (float): Y position
+            draw (bool): Whether to draw
+            img_out (numpy.ndarray): Output image
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if double tap detected
+        """
+        if not st['pressing']:
+            return False
+        
+        # Update peaks
+        st['min_zrel'] = min(st['min_zrel'], st['ema_zrel'])
+        st['min_plane'] = min(st['min_plane'], st['ema_plane'])
+        st['max_ang'] = max(st['max_ang'], st['ema_ang'])
+        
+        # Compute baselines for comparison
+        base_zrel = self._adaptive_baseline(st['zrel_hist'], st['prev_zrel'])
+        base_plane = self._adaptive_baseline(st['plane_hist'], st['prev_plane'])
+        
+        st['peak_zrel_depth'] = max(st['peak_zrel_depth'], base_zrel - st['min_zrel'])
+        st['peak_plane_depth'] = max(st['peak_plane_depth'], base_plane - st['min_plane'])
+        st['peak_ang_depth'] = max(st['peak_ang_depth'], st['max_ang'] - st['prev_ang'])
+        
+        # Check release conditions
+        if not self._should_release_enhanced_press(st, now, velocities, thresholds):
+            return False
+        
+        # Validate tap
+        if not self._is_valid_enhanced_tap(st, now, pos_x, pos_y, velocities, thresholds):
+            st['pressing'] = False
+            return False
+        
+        # Check for double tap
+        return self._check_enhanced_double_tap(st, now, pos_x, pos_y, draw, img_out)
+    
+    def _should_release_enhanced_press(self, st, now, velocities, thresholds):
+        """
+        Check if enhanced press should be released.
+        
+        Args:
+            st (dict): Enhanced state
+            now (float): Current timestamp
+            velocities (dict): Velocity components
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if should release
+        """
+        # Z-relative release conditions
+        back_zrel = st['ema_zrel'] - st['min_zrel']
+        enough_back_zrel = (st['peak_zrel_depth'] >= thresholds['zrel_min_press_depth']) and \
+                          (back_zrel >= self.TAP_MAX_RELEASE_BACK * st['peak_zrel_depth'])
+        vrel_release = (velocities['vzrel'] >= self.TAP_RELEASE_VEL) and \
+                      ((now - st['press_start']) >= self.TAP_MIN_DURATION)
+        
+        # Plane release conditions
+        back_plane = st['ema_plane'] - st['min_plane']
+        enough_back_plane = (st['peak_plane_depth'] >= thresholds['plane_min_press_depth']) and \
+                           (back_plane >= self.PLANE_RELEASE_BACK * st['peak_plane_depth'])
+        vplane_release = (velocities['vplane'] >= self.TAP_RELEASE_VEL) and \
+                        ((now - st['press_start']) >= self.TAP_MIN_DURATION)
+        
+        # Angle release conditions
+        back_ang = st['max_ang'] - st['ema_ang']
+        enough_back_ang = (st['peak_ang_depth'] >= thresholds['ang_min_press_depth']) and \
+                         (back_ang >= self.ANG_RELEASE_BACK * st['peak_ang_depth'])
+        vang_release = (velocities['vang'] <= self.ANG_RELEASE_VEL) and \
+                      ((now - st['press_start']) >= self.TAP_MIN_DURATION)
+        
+        # Check timeout
+        too_long = (now - st['press_start'] > self.TAP_MAX_DURATION)
+        
+        # Require at least 2 release signals or timeout
+        release_votes = sum([enough_back_zrel or vrel_release,
+                            enough_back_plane or vplane_release,
+                            enough_back_ang or vang_release])
+        
+        return release_votes >= 2 or too_long
+    
+    def _is_valid_enhanced_tap(self, st, now, pos_x, pos_y, velocities, thresholds):
+        """
+        Validate enhanced tap using rules and classifier.
+        
+        Args:
+            st (dict): Enhanced state
+            now (float): Current timestamp
+            pos_x (float): X position
+            pos_y (float): Y position
+            velocities (dict): Velocity components
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            bool: True if valid tap
+        """
+        duration = now - st['press_start']
+        drift = float(np.hypot(pos_x - st['press_start_xy'][0], pos_y - st['press_start_xy'][1]))
+        
+        # Rule-based validation
+        valid_rule = (duration >= self.TAP_MIN_DURATION) and \
+                    (drift <= thresholds['tap_max_xy_drift']) and \
+                    ((st['peak_zrel_depth'] >= thresholds['zrel_min_press_depth']) or
+                     (st['peak_plane_depth'] >= thresholds['plane_min_press_depth']) or
+                     (st['peak_ang_depth'] >= thresholds['ang_min_press_depth']))
+        
+        # Classifier-based validation
+        feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
+                         drift, abs(velocities['vzrel']), abs(velocities['vplane']), duration], dtype=float)
+        prob = self._tiny_cls_prob(feats)
+        
+        return valid_rule and (prob >= self.CLS_MIN_PROB)
+    
+    def _check_enhanced_double_tap(self, st, now, pos_x, pos_y, draw, img_out):
+        """
+        Check for enhanced double tap.
+        
+        Args:
+            st (dict): Enhanced state
+            now (float): Current timestamp
+            pos_x (float): X position
+            pos_y (float): Y position
+            draw (bool): Whether to draw
+            img_out (numpy.ndarray): Output image
+            
+        Returns:
+            bool: True if double tap detected
+        """
+        last_tap = st['last_tap']
+        gap = now - last_tap if last_tap > 0.0 else 1e9
+        
+        if (last_tap > 0.0) and (self.TAP_MIN_INTERVAL <= gap <= self.TAP_MAX_INTERVAL) and \
+           (now >= st['cooldown_until']):
+            if draw and img_out is not None:
+                cv.putText(img_out, "DOUBLE TAP", (int(pos_x), int(pos_y) - 10),
+                          cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            st['last_tap'] = 0.0
+            st['cooldown_until'] = now + self.TAP_COOLDOWN
+            st['pressing'] = False
+            return True
+        else:
+            st['last_tap'] = now
+            st['pressing'] = False
+            return False
+    
+    def _update_enhanced_state(self, st, now, pos_x, pos_y, signals):
+        """
+        Update enhanced state for next frame.
+        
+        Args:
+            st (dict): Enhanced state
+            now (float): Current timestamp
+            pos_x (float): X position
+            pos_y (float): Y position
+            signals (dict): Current signals
+        """
+        st['prev_ts'] = now
+        st['prev_xy'] = np.array([pos_x, pos_y], dtype=float)
+        st['prev_zrel'] = st['ema_zrel']
+        st['prev_ang'] = st['ema_ang']
+        st['prev_plane'] = st['ema_plane']
 
     # ---------- Stronger pointing gate ----------
     def _strong_pointing_gate(self, hand_landmarks, w, h):
@@ -1189,22 +1908,78 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         others_max = max(r_mid, r_rng, r_ltl)
         return (r_idx >= self.INDEX_STRONG_MIN) and (others_max <= self.OTHERS_STRONG_MAX)
 
-# --- Combination wrapper to run base + enhanced and fuse outputs ---
+# ==================== Combination wrapper ====================
 class CombinedPoseDetector:
-    """Wrapper that preserves base behavior and layers enhanced precision on top."""
+    """
+    Combined pose detector that runs both base and enhanced detectors.
+    
+    This wrapper preserves base behavior while layering enhanced precision on top.
+    It runs the base detector first, caches results, then runs the enhanced detector
+    using the same MediaPipe results, and finally fuses the outputs.
+    
+    Benefits:
+    - Maximum reliability through fusion of multiple detection methods
+    - Efficient processing (MediaPipe runs only once)
+    - Backward compatible with base detector behavior
+    - Production-ready with comprehensive tap detection
+    
+    Usage:
+        detector = CombinedPoseDetector(model)
+        index_pos, status, img = detector.detect(frame, H, None, draw=True)
+    """
+    
     def __init__(self, model):
+        """
+        Initialize combined pose detector.
+        
+        Args:
+            model (dict): Map model configuration containing:
+                - filename: Path to map image file
+                - Other model-specific parameters
+        """
         self.base = PoseDetectorMP(model)
         self.enh = PoseDetectorMPEnhanced(model)
+        
         # Tell enhanced to use cached base outputs instead of calling super()
         self.enh._skip_super = True
+        
         # Propagate image (for downstream tools that may inspect it)
         self.image_map_color = self.base.image_map_color
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
-        """Run base pass, cache outputs, then run enhanced and fuse results."""
+        """
+        Run base pass, cache outputs, then run enhanced and fuse results.
+        
+        This method orchestrates the detection pipeline:
+        1. Run base detector (compute-only, no drawing)
+        2. Cache base outputs and MediaPipe results
+        3. Run enhanced detector using cached MediaPipe results
+        4. Fuse outputs and return (enhanced detector handles drawing)
+        
+        Args:
+            image (numpy.ndarray): Input camera frame
+            H (numpy.ndarray): Homography matrix for coordinate transformation
+            _ : Unused parameter (kept for compatibility)
+            processing_scale (float): Scale factor for processing (smaller = faster)
+            draw (bool): Whether to draw hand landmarks and annotations
+            
+        Returns:
+            tuple: (index_pos, movement_status, img_out)
+                - index_pos: Normalized position of index finger [x, y, z] or None
+                - movement_status: 'pointing', 'moving', 'double_tap', etc.
+                - img_out: Annotated image if draw=True, else None
+        """
         # Draw only once (in enhanced), keep base compute-only
-        base_index_pos, base_status, base_img = self.base.detect(image, H, _, processing_scale, draw=False)
+        base_index_pos, base_status, base_img = self.base.detect(
+            image, H, _, processing_scale, draw=False
+        )
+        
+        # Cache base outputs for enhanced detector
         self.enh._base_cache = (base_index_pos, base_status, base_img)
+        
+        # Share MediaPipe results to avoid reprocessing
         mp_results, ow, oh = self.base.get_cached_mp_results()
         self.enh._provided_results = (mp_results, ow, oh)
+        
+        # Run enhanced detector with drawing enabled
         return self.enh.detect(image, H, _, processing_scale, draw)
