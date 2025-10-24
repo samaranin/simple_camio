@@ -3,6 +3,25 @@ MediaPipe-based hand pose detection for Simple CamIO.
 
 This module handles hand tracking, pointing gesture recognition, and tap detection
 using MediaPipe's hand landmark detection.
+
+HAND SIZE SCALING:
+The tap detection system now adapts thresholds based on hand size (distance from camera).
+When hands appear smaller (farther from camera), detection becomes MORE sensitive by
+REDUCING thresholds proportionally. This ensures consistent tap detection across all
+distances.
+
+Scaling is based on palm width (index MCP to pinky MCP distance):
+- Reference size: 180px (calibrated for close-up hands)
+- Small hand threshold: <80px (applies aggressive 0.35x scaling)
+- Scaling range: 0.35x to 1.0x (more sensitive when small)
+
+Scaled parameters include:
+- Z-depth thresholds (TAP_BASE_DELTA, TAP_MIN_PRESS_DEPTH)
+- Angle thresholds (ANG_BASE_DELTA, ANG_MIN_PRESS_DEPTH)
+- XY drift allowance (TAP_MAX_XY_DRIFT)
+- Velocity thresholds (TAP_MIN_VEL, RAY_MIN_IN_VEL)
+- Enhanced detection thresholds (PLANE_*, ZREL_*)
+
 """
 
 import numpy as np
@@ -53,6 +72,9 @@ class PoseDetectorMP:
         # Cache for reusing MP results (results object and frame dims)
         self._last_mp_results = None
         self._last_frame_dims = None  # (orig_w, orig_h)
+        
+        # Cache for hand size scaling
+        self._hand_size_cache = {}  # keyed by hand label
 
     def _load_tap_config(self):
         """Load tap detection configuration parameters."""
@@ -86,6 +108,122 @@ class PoseDetectorMP:
         # New: allow taps while moving (non-pointing)
         self.ALLOW_TAP_WHILE_MOVING = getattr(cfg, 'ALLOW_TAP_WHILE_MOVING', True)
         self.MOVING_TAP_TRIGGER_COUNT = getattr(cfg, 'MOVING_TAP_TRIGGER_COUNT', 3)
+
+        # Hand size scaling parameters
+        self.REFERENCE_PALM_WIDTH = cfg.REFERENCE_PALM_WIDTH
+        self.MIN_SCALE_FACTOR = cfg.MIN_SCALE_FACTOR
+        self.MAX_SCALE_FACTOR = cfg.MAX_SCALE_FACTOR
+        self.SMALL_HAND_THRESHOLD = cfg.SMALL_HAND_THRESHOLD
+
+    def _compute_hand_size(self, hand_landmarks, width, height):
+        """
+        Compute hand size metric based on palm width.
+        
+        Args:
+            hand_landmarks: MediaPipe hand landmarks
+            width (int): Image width
+            height (int): Image height
+            
+        Returns:
+            float: Palm width in pixels (distance between index MCP and pinky MCP)
+        """
+        # Index MCP (landmark 5) and Pinky MCP (landmark 17)
+        idx_mcp = hand_landmarks.landmark[5]
+        pinky_mcp = hand_landmarks.landmark[17]
+        
+        # Calculate Euclidean distance in pixel space
+        dx = (idx_mcp.x - pinky_mcp.x) * width
+        dy = (idx_mcp.y - pinky_mcp.y) * height
+        palm_width = float(np.sqrt(dx * dx + dy * dy))
+        
+        return palm_width
+    
+    def _compute_scale_factor(self, palm_width):
+        """
+        Compute scaling factor based on hand size.
+        
+        For small hands (far from camera), we need MORE sensitive detection,
+        which means SMALLER thresholds, so we return a scale factor < 1.0.
+        
+        Args:
+            palm_width (float): Measured palm width in pixels
+            
+        Returns:
+            float: Scale factor in range [MIN_SCALE_FACTOR, MAX_SCALE_FACTOR]
+        """
+        if palm_width >= self.REFERENCE_PALM_WIDTH:
+            # Big hand or reference size: no scaling
+            return self.MAX_SCALE_FACTOR
+        elif palm_width <= self.SMALL_HAND_THRESHOLD:
+            # Very small hand: use minimum scale factor for maximum sensitivity
+            return self.MIN_SCALE_FACTOR
+        else:
+            # Linear interpolation between small and reference
+            ratio = (palm_width - self.SMALL_HAND_THRESHOLD) / \
+                    (self.REFERENCE_PALM_WIDTH - self.SMALL_HAND_THRESHOLD)
+            scale = self.MIN_SCALE_FACTOR + ratio * (self.MAX_SCALE_FACTOR - self.MIN_SCALE_FACTOR)
+            return float(scale)
+    
+    def _get_scaled_thresholds(self, hand_key, palm_width):
+        """
+        Get scaled thresholds for tap detection based on hand size.
+        
+        Uses caching to avoid recomputing for each frame when hand size is stable.
+        
+        Args:
+            hand_key (str): Hand identifier ('Left' or 'Right')
+            palm_width (float): Current palm width in pixels
+            
+        Returns:
+            dict: Dictionary of scaled threshold values
+        """
+        # Check cache
+        cache_entry = self._hand_size_cache.get(hand_key)
+        if cache_entry is not None:
+            cached_width, cached_thresholds = cache_entry
+            # Use cached values if hand size hasn't changed significantly (±5%)
+            if abs(palm_width - cached_width) / cached_width < 0.05:
+                return cached_thresholds
+        
+        # Compute scale factor
+        scale = self._compute_scale_factor(palm_width)
+        
+        # For velocity thresholds, we need VERY aggressive scaling because:
+        # 1. Physical tap speed is constant regardless of distance
+        # 2. Z-coordinate velocity scales roughly with distance^2 (perspective effect)
+        # 3. Small hands (far away) produce much smaller z-velocities
+        # 
+        # Use direct linear scaling with very low floor to allow tiny velocities:
+        # - scale=1.0 → vel_scale=1.0 (no change for big hands)
+        # - scale=0.5 → vel_scale=0.50 (half for medium hands)
+        # - scale=0.35 → vel_scale=0.35 (very lenient for small hands)
+        # - scale=0.2 → vel_scale=0.20 (extremely lenient for tiny hands)
+        velocity_scale = max(0.15, scale)  # Linear scaling, floor at 0.15
+        
+        # Scale the thresholds (smaller scale = more sensitive)
+        thresholds = {
+            'scale_factor': scale,
+            'palm_width': palm_width,
+            'velocity_scale': velocity_scale,  # Track velocity scaling separately
+            'tap_base_delta': self.TAP_BASE_DELTA * scale,
+            'tap_min_press_depth': self.TAP_MIN_PRESS_DEPTH * scale,
+            'tap_max_xy_drift': self.TAP_MAX_XY_DRIFT * scale,
+            'tap_min_vel': self.TAP_MIN_VEL * velocity_scale,  # Use linear scaling (1:1 with scale)
+            'ang_base_delta': self.ANG_BASE_DELTA * scale,
+            'ang_min_press_depth': self.ANG_MIN_PRESS_DEPTH * scale,
+        }
+        
+        # Log scaling info for debugging (only on first computation or significant change)
+        if cache_entry is None:
+            logger.debug(f"Hand size scaling: palm={palm_width:.1f}px, "
+                        f"scale={scale:.2f}, vel_scale={velocity_scale:.2f}, "
+                        f"depth_thresh={thresholds['tap_min_press_depth']:.4f}, "
+                        f"vel_thresh={thresholds['tap_min_vel']:.3f}")
+        
+        # Cache the result
+        self._hand_size_cache[hand_key] = (palm_width, thresholds)
+        
+        return thresholds
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
         """
@@ -303,6 +441,10 @@ class PoseDetectorMP:
             now = time.time()
             lm8_z = float(hand_landmarks.landmark[8].z)
 
+            # Compute hand size and get scaled thresholds
+            palm_width = self._compute_hand_size(hand_landmarks, width, height)
+            thresholds = self._get_scaled_thresholds(hand_key, palm_width)
+
             # Compute distal flexion angle at index DIP
             angle_deg = self._compute_finger_flexion_angle(hand_landmarks, width, height)
 
@@ -315,8 +457,8 @@ class PoseDetectorMP:
             state['ang_history'].append(angle_deg)
 
             # Calculate baselines (median) and noise (median of |diff|)
-            baseline_z, noise_z, dz_press = self._calculate_z_baseline(state)
-            baseline_ang, noise_ang, dang_press = self._calculate_angle_baseline(state)
+            baseline_z, noise_z, dz_press = self._calculate_z_baseline(state, thresholds)
+            baseline_ang, noise_ang, dang_press = self._calculate_angle_baseline(state, thresholds)
 
             # Velocities (per second); dt protected from 0 by 1e-3
             dt = max(1e-3, now - state['prev_ts'])
@@ -326,12 +468,12 @@ class PoseDetectorMP:
             # Try to start a press if either Z or angle triggers activate
             if self._try_start_press(state, is_pointing, now, baseline_z, lm8_z,
                                     dz_press, vz, baseline_ang, angle_deg,
-                                    dang_press, vang, pos_x, pos_y):
+                                    dang_press, vang, pos_x, pos_y, thresholds):
                 pass  # Press started
 
             # Check for tap completion (single/double)
             double_tap = self._check_tap_release(state, now, lm8_z, vz, angle_deg,
-                                                 vang, pos_x, pos_y, draw, img_out)
+                                                 vang, pos_x, pos_y, draw, img_out, thresholds)
 
             # Update state for next frame
             state['prev_z'] = lm8_z
@@ -388,34 +530,46 @@ class PoseDetectorMP:
             }
         return self._tap_state[hand_key]
 
-    def _calculate_z_baseline(self, state):
+    def _calculate_z_baseline(self, state, thresholds):
         """Calculate Z-depth baseline and noise-adaptive threshold."""
         z_hist = list(state['z_history'])
         baseline_z = np.median(z_hist) if len(z_hist) >= 3 else state['prev_z']  # robust center
         dz_abs = np.abs(np.diff(z_hist)) if len(z_hist) >= 2 else np.array([0.0])  # frame-to-frame jitter
         noise_z = float(np.median(dz_abs)) if dz_abs.size > 0 else 0.0            # robust noise estimate
-        dz_press = max(self.TAP_BASE_DELTA, self.TAP_NOISE_MULT * noise_z)        # adaptive margin
+        # Use scaled BASE_DELTA for better sensitivity with small hands
+        dz_press = max(thresholds['tap_base_delta'], self.TAP_NOISE_MULT * noise_z)
         return baseline_z, noise_z, dz_press
 
-    def _calculate_angle_baseline(self, state):
+    def _calculate_angle_baseline(self, state, thresholds):
         """Calculate angle baseline and noise-adaptive threshold."""
         ang_hist = list(state['ang_history'])
         baseline_ang = np.median(ang_hist) if len(ang_hist) >= 3 else state['prev_angle']
         dang_abs = np.abs(np.diff(ang_hist)) if len(ang_hist) >= 2 else np.array([0.0])
         noise_ang = float(np.median(dang_abs)) if dang_abs.size > 0 else 0.0
-        dang_press = max(self.ANG_BASE_DELTA, self.ANG_NOISE_MULT * noise_ang)
+        # Use scaled ANG_BASE_DELTA for better sensitivity with small hands
+        dang_press = max(thresholds['ang_base_delta'], self.ANG_NOISE_MULT * noise_ang)
         return baseline_ang, noise_ang, dang_press
 
     def _try_start_press(self, state, is_pointing, now, baseline_z, lm8_z,
                         dz_press, vz, baseline_ang, angle_deg, dang_press, vang,
-                        pos_x, pos_y):
+                        pos_x, pos_y, thresholds):
         """Try to start a tap press based on Z or angle triggers."""
         # Relaxed gate: allow press start while moving if enabled by config
         if (not state['pressing']) and (is_pointing or self.ALLOW_TAP_WHILE_MOVING) and (now >= state.get('cooldown_until', 0.0)):
             # Z trigger: tip moved inward beyond baseline by dz_press and with sufficient inward speed
-            z_press = (baseline_z - lm8_z > dz_press) and (vz <= -self.TAP_MIN_VEL)
+            # Use scaled velocity threshold
+            z_press = (baseline_z - lm8_z > dz_press) and (vz <= -thresholds['tap_min_vel'])
+            
             # Angle trigger: distal joint closing beyond baseline by dang_press and fast enough
-            ang_press = (angle_deg - baseline_ang > dang_press) and (vang >= self.ANG_MIN_VEL)
+            # BUT: disable angle detection for small hands (scale < 0.5) due to unreliability
+            # AND: sanity check - reject angle changes > 50 degrees (likely noise/tracking errors)
+            angle_delta = angle_deg - baseline_ang
+            angle_is_sane = (0 < angle_delta < 50)  # Reasonable flexion range
+            scale = thresholds.get('scale_factor', 1.0)
+            ang_press = (scale >= 0.5 and  # Only use angles for medium/big hands
+                        angle_is_sane and
+                        (angle_delta > dang_press) and
+                        (vang >= self.ANG_MIN_VEL))
 
             if z_press or ang_press:
                 state['pressing'] = True
@@ -439,7 +593,7 @@ class PoseDetectorMP:
         return False
 
     def _check_tap_release(self, state, now, lm8_z, vz, angle_deg, vang,
-                          pos_x, pos_y, draw, img_out):
+                          pos_x, pos_y, draw, img_out, thresholds):
         """Check if a press should be released and if it forms a (double) tap."""
         if not state['pressing']:
             return False
@@ -458,14 +612,16 @@ class PoseDetectorMP:
         # Release when sufficient "back-out" or velocity reversal or timeout
         depth_z = max(0.0, state['peak_depth'])
         back_z = lm8_z - state['min_z']  # how much tip returned from deepest point
-        enough_back_z = ((depth_z >= self.TAP_MIN_PRESS_DEPTH) and
+        # Use scaled threshold for minimum press depth
+        enough_back_z = ((depth_z >= thresholds['tap_min_press_depth']) and
                         (back_z >= self.TAP_MAX_RELEASE_BACK * depth_z))
         velocity_release_z = ((vz >= self.TAP_RELEASE_VEL) and
                              ((now - state['press_start']) >= self.TAP_MIN_DURATION))
 
         depth_ang = max(0.0, state['peak_angle_depth'])
         back_ang = state['max_angle'] - angle_deg  # angle opened back
-        enough_back_ang = ((depth_ang >= self.ANG_MIN_PRESS_DEPTH) and
+        # Use scaled threshold for minimum angle press depth
+        enough_back_ang = ((depth_ang >= thresholds['ang_min_press_depth']) and
                           (back_ang >= self.ANG_RELEASE_BACK * depth_ang))
         velocity_release_ang = ((vang <= self.ANG_RELEASE_VEL) and
                                ((now - state['press_start']) >= self.TAP_MIN_DURATION))
@@ -480,15 +636,18 @@ class PoseDetectorMP:
             xy_drift = float(np.hypot(pos_x - sx, pos_y - sy))  # Euclidean drift during press
 
             # Validate tap with duration, drift, and sufficient excursion in depth or angle
+            # Use scaled thresholds for validation
             valid_tap = ((press_duration >= self.TAP_MIN_DURATION) and
-                        (xy_drift <= self.TAP_MAX_XY_DRIFT) and
-                        ((depth_z >= self.TAP_MIN_PRESS_DEPTH) or
-                         (depth_ang >= self.ANG_MIN_PRESS_DEPTH)))
+                        (xy_drift <= thresholds['tap_max_xy_drift']) and
+                        ((depth_z >= thresholds['tap_min_press_depth']) or
+                         (depth_ang >= thresholds['ang_min_press_depth'])))
 
             if valid_tap:
                 logger.info(f"Tap detected: duration={press_duration:.3f}s, "
                           f"depth={depth_z:.4f}, angleDepth={depth_ang:.1f}, "
-                          f"drift={xy_drift:.1f}")
+                          f"drift={xy_drift:.1f}, scale={thresholds['scale_factor']:.2f}, "
+                          f"velScale={thresholds.get('velocity_scale', 1.0):.2f}, "
+                          f"palmWidth={thresholds['palm_width']:.1f}px")
 
                 last_tap = state.get('last_tap', 0.0)
                 gap = now - last_tap if last_tap > 0.0 else 1e9
@@ -593,6 +752,8 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         self._tap_state_plus = {}  # keyed by hand ('Left'/'Right')
         # Load enhanced configuration parameters into instance
         self._load_enhanced_config()
+        # Reuse hand size cache from base class
+        # self._hand_size_cache is inherited
 
     def _load_enhanced_config(self):
         """Load enhanced tap detection configuration parameters."""
@@ -627,6 +788,37 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
             self.CLS_WEIGHTS = np.array([2.0, 1.2, 1.0, -0.8, -0.9, -0.4, 0.6], dtype=float)
         self.CLS_BIAS = cfg.CLS_BIAS
         self.CLS_MIN_PROB = cfg.CLS_MIN_PROB
+
+    def _get_enhanced_scaled_thresholds(self, hand_key, palm_width):
+        """
+        Get scaled thresholds for enhanced tap detection based on hand size.
+        
+        Extends base class scaling to include enhanced detector thresholds.
+        
+        Args:
+            hand_key (str): Hand identifier
+            palm_width (float): Palm width in pixels
+            
+        Returns:
+            dict: Dictionary of scaled threshold values (includes base + enhanced)
+        """
+        # Get base thresholds
+        thresholds = self._get_scaled_thresholds(hand_key, palm_width)
+        scale = thresholds['scale_factor']
+        
+        # Use same velocity scaling as base class for consistency (linear 1:1)
+        velocity_scale = thresholds.get('velocity_scale', max(0.15, scale))
+        
+        # Add enhanced thresholds
+        thresholds.update({
+            'plane_base_delta': self.PLANE_BASE_DELTA * scale,
+            'plane_min_press_depth': self.PLANE_MIN_PRESS_DEPTH * scale,
+            'zrel_base_delta': self.ZREL_BASE_DELTA * scale,
+            'zrel_min_press_depth': self.ZREL_MIN_PRESS_DEPTH * scale,
+            'ray_min_in_vel': self.RAY_MIN_IN_VEL * velocity_scale,  # Use sqrt scaling for velocity
+        })
+        
+        return thresholds
 
     # ---------- Geometry helpers ----------
 
@@ -827,6 +1019,10 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 zrel = self._relative_tip_depth(hand_landmarks)
                 idx_dir = self._index_dir(hand_landmarks, orig_w, orig_h)
 
+                # Compute hand size and get scaled thresholds
+                palm_width = self._compute_hand_size(hand_landmarks, orig_w, orig_h)
+                thresholds = self._get_enhanced_scaled_thresholds(hand_key, palm_width)
+
                 # Per-hand enhanced state
                 now = time.time()
                 st = self._get_plus_state(hand_key, now, (pos_x, pos_y), zrel, angle_deg, plane_d, palm_n)
@@ -866,10 +1062,10 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 dplane_press = max(self.PLANE_BASE_DELTA, self.PLANE_NOISE_MULT * noise_plane)
 
                 # Triggers (MP z is more negative toward camera)
-                zrel_press = (base_zrel - st['ema_zrel'] > dzrel_press) and (vzrel <= -self.TAP_MIN_VEL)
+                zrel_press = (base_zrel - st['ema_zrel'] > dzrel_press) and (vzrel <= -thresholds['tap_min_vel'])
                 ang_press = (st['ema_ang'] - st['prev_ang'] > 0) and (vang >= self.ANG_MIN_VEL)
-                plane_press = (base_plane - st['ema_plane'] > dplane_press) and (vplane <= -self.TAP_MIN_VEL)
-                ray_press = (ray_in_v >= self.RAY_MIN_IN_VEL)
+                plane_press = (base_plane - st['ema_plane'] > dplane_press) and (vplane <= -thresholds['tap_min_vel'])
+                ray_press = (ray_in_v >= thresholds['ray_min_in_vel'])
 
                 # Late fusion with moving support:
                 # - Pointing: need >=2 triggers
@@ -902,15 +1098,15 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
 
                     # Release conditions (consensus of signals or timeout)
                     back_zrel = st['ema_zrel'] - st['min_zrel']  # amount returned after peak
-                    enough_back_zrel = (st['peak_zrel_depth'] >= self.ZREL_MIN_PRESS_DEPTH) and (back_zrel >= self.TAP_MAX_RELEASE_BACK * st['peak_zrel_depth'])
+                    enough_back_zrel = (st['peak_zrel_depth'] >= thresholds['zrel_min_press_depth']) and (back_zrel >= self.TAP_MAX_RELEASE_BACK * st['peak_zrel_depth'])
                     vrel_release = (vzrel >= self.TAP_RELEASE_VEL) and ((now - st['press_start']) >= self.TAP_MIN_DURATION)
 
                     back_plane = st['ema_plane'] - st['min_plane']
-                    enough_back_plane = (st['peak_plane_depth'] >= self.PLANE_MIN_PRESS_DEPTH) and (back_plane >= self.PLANE_RELEASE_BACK * st['peak_plane_depth'])
+                    enough_back_plane = (st['peak_plane_depth'] >= thresholds['plane_min_press_depth']) and (back_plane >= self.PLANE_RELEASE_BACK * st['peak_plane_depth'])
                     vplane_release = (vplane >= self.TAP_RELEASE_VEL) and ((now - st['press_start']) >= self.TAP_MIN_DURATION)
 
                     back_ang = st['max_ang'] - st['ema_ang']
-                    enough_back_ang = (st['peak_ang_depth'] >= self.ANG_MIN_PRESS_DEPTH) and (back_ang >= self.ANG_RELEASE_BACK * st['peak_ang_depth'])
+                    enough_back_ang = (st['peak_ang_depth'] >= thresholds['ang_min_press_depth']) and (back_ang >= self.ANG_RELEASE_BACK * st['peak_ang_depth'])
                     vang_release = (vang <= self.ANG_RELEASE_VEL) and ((now - st['press_start']) >= self.TAP_MIN_DURATION)
 
                     too_long = (now - st['press_start'] > self.TAP_MAX_DURATION)
@@ -922,10 +1118,10 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                         # Validate tap by duration, XY drift, and peak depth/angle excursion
                         duration = now - st['press_start']
                         drift = float(np.hypot(pos_x - st['press_start_xy'][0], pos_y - st['press_start_xy'][1]))
-                        valid_rule = (duration >= self.TAP_MIN_DURATION) and (drift <= self.TAP_MAX_XY_DRIFT) and (
-                            (st['peak_zrel_depth'] >= self.ZREL_MIN_PRESS_DEPTH) or
-                            (st['peak_plane_depth'] >= self.PLANE_MIN_PRESS_DEPTH) or
-                            (st['peak_ang_depth'] >= self.ANG_MIN_PRESS_DEPTH)
+                        valid_rule = (duration >= self.TAP_MIN_DURATION) and (drift <= thresholds['tap_max_xy_drift']) and (
+                            (st['peak_zrel_depth'] >= thresholds['zrel_min_press_depth']) or
+                            (st['peak_plane_depth'] >= thresholds['plane_min_press_depth']) or
+                            (st['peak_ang_depth'] >= thresholds['ang_min_press_depth'])
                         )
 
                         # Tiny classifier over engineered features for final validation
