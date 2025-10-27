@@ -3,13 +3,19 @@ Configuration module for Simple CamIO.
 
 This module contains all configuration parameters and constants used throughout the application.
 Centralizing configuration makes it easier to tune parameters and understand system behavior.
+
+PERFORMANCE TUNING:
+- For best FPS: Set DEFAULT_WIDTH=640, DEFAULT_HEIGHT=480, USE_THREADED_CAPTURE=True
+- For quality: Set DEFAULT_WIDTH=1920, DEFAULT_HEIGHT=1080, but expect lower FPS
+- If camera is slow: Enable USE_THREADED_CAPTURE and try BACKEND=cv.CAP_MSMF
 """
 
 # ==================== Camera Configuration ====================
 class CameraConfig:
     """Camera capture configuration parameters."""
 
-    # Default camera resolution
+    # Default camera resolution (lower = faster)
+    # Try 640x480 for best FPS, 1280x720 for balance, 1920x1080 for quality
     DEFAULT_WIDTH = 1920
     DEFAULT_HEIGHT = 1080
 
@@ -24,6 +30,15 @@ class CameraConfig:
     
     # Target FPS for camera (actual may vary by camera capability)
     TARGET_FPS = 30
+    
+    # Use threaded camera capture (can improve FPS significantly)
+    USE_THREADED_CAPTURE = True
+    
+    # Camera backend to use (None for default, or cv.CAP_DSHOW, cv.CAP_MSMF, cv.CAP_ANY)
+    # DSHOW: DirectShow (good compatibility, may be slower)
+    # MSMF: Media Foundation (faster, Windows 10+)
+    # None: Let OpenCV choose
+    BACKEND = None  # Change to cv.CAP_MSMF for potentially better performance
 
 
 # ==================== Movement Filter Configuration ====================

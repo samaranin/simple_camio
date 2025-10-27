@@ -11,6 +11,7 @@ import logging
 
 from src.config import UIConfig, CameraConfig
 from src.core.utils import draw_rectangle_from_points, draw_rectangle_on_image
+from src.core.camera_thread import ThreadedCamera
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,9 @@ def setup_camera(cam_port):
     """
     logger.info(f"Setting up camera on port {cam_port}")
 
-    cap = cv.VideoCapture(cam_port, cv.CAP_DSHOW)
+    # Use configured backend or default
+    backend = CameraConfig.BACKEND if hasattr(CameraConfig, 'BACKEND') and CameraConfig.BACKEND else cv.CAP_DSHOW
+    cap = cv.VideoCapture(cam_port, backend)
     
     # Set buffer size BEFORE other properties to reduce latency
     cap.set(cv.CAP_PROP_BUFFERSIZE, CameraConfig.BUFFER_SIZE)
@@ -129,5 +132,10 @@ def setup_camera(cam_port):
         cv.setNumThreads(num_threads)
     except Exception:
         pass
+
+    # Wrap in threaded capture if enabled
+    if CameraConfig.USE_THREADED_CAPTURE:
+        logger.info("Using threaded camera capture for improved FPS")
+        cap = ThreadedCamera(cap)
 
     return cap

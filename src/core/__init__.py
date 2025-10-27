@@ -27,6 +27,8 @@ from .workers import (
 
 from .interaction_policy import InteractionPolicy2D
 
+from .camera_thread import ThreadedCamera
+
 __all__ = [
     # Utilities
     'select_camera_port',
@@ -42,4 +44,6 @@ __all__ = [
     'AudioCommand',
     # Interaction
     'InteractionPolicy2D',
+    # Camera
+    'ThreadedCamera',
 ]
