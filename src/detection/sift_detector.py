@@ -8,6 +8,7 @@ using SIFT feature matching and homography estimation.
 import numpy as np
 import cv2 as cv
 import logging
+import time
 from src.config import SIFTConfig
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ class SIFTModelDetectorMP:
         self.MIN_INLIER_COUNT = SIFTConfig.MIN_INLIER_COUNT
         self.frames_since_last_detection = 0
         self.REDETECT_INTERVAL = SIFTConfig.REDETECT_INTERVAL
+        self.VALIDATION_INTERVAL = SIFTConfig.VALIDATION_INTERVAL
+        self.last_validation_time = 0  # Track time since last validation
         self.last_inlier_count = 0
         self.tracking_quality_history = []
         self.MIN_TRACKING_QUALITY = SIFTConfig.MIN_TRACKING_QUALITY
@@ -142,17 +145,19 @@ class SIFTModelDetectorMP:
         # Automatic re-detection triggers
         if not self.requires_homography:
             self.frames_since_last_detection += 1
+            current_time = time.time()
+            time_since_validation = current_time - self.last_validation_time
 
-            # Periodic validation
-            if self.frames_since_last_detection >= self.REDETECT_INTERVAL:
-                logger.debug(f"Periodic validation after {self.frames_since_last_detection} frames")
+            # Primary: Time-based periodic validation (every VALIDATION_INTERVAL seconds)
+            if time_since_validation >= self.VALIDATION_INTERVAL:
                 self._validate_tracking(frame)
+                self.last_validation_time = current_time
 
             # Quality degradation check
             if len(self.tracking_quality_history) >= 3:
                 avg_quality = np.mean(self.tracking_quality_history[-3:])
                 if avg_quality < self.MIN_TRACKING_QUALITY:
-                    logger.warning(f"Tracking degraded (avg: {avg_quality:.1f}), re-detecting")
+                    logger.warning(f"Tracking quality degraded (avg: {avg_quality:.1f} < {self.MIN_TRACKING_QUALITY}), triggering re-detection")
                     self.requires_homography = True
                     self.H = None
                     self.tracking_quality_history.clear()
@@ -184,6 +189,7 @@ class SIFTModelDetectorMP:
         keypoints_scene, descriptors_scene = self.sift_detector.detectAndCompute(frame, None)
 
         if descriptors_scene is None or len(keypoints_scene) < 4:
+            logger.warning(f"Map position changed: insufficient features (keypoints: {len(keypoints_scene) if keypoints_scene else 0}) - triggering re-detection")
             self.requires_homography = True
             self.H = None
             return
@@ -211,18 +217,15 @@ class SIFTModelDetectorMP:
             if len(self.tracking_quality_history) > 10:
                 self.tracking_quality_history.pop(0)
 
-            if self.debug:
-                logger.debug(f"Validation: {match_count} matches")
-
             if match_count < self.MIN_TRACKING_QUALITY:
-                logger.warning("Validation failed: triggering re-detection")
+                logger.warning(f"Map position changed: quality degraded ({match_count} < {self.MIN_TRACKING_QUALITY} matches) - triggering re-detection")
                 self.requires_homography = True
                 self.H = None
             else:
                 self.frames_since_last_detection = 0
 
         except Exception as e:
-            logger.error(f"Validation error: {e}")
+            logger.error(f"Validation error: {e} - triggering re-detection")
             self.requires_homography = True
             self.H = None
 
@@ -250,8 +253,7 @@ class SIFTModelDetectorMP:
                 if m.distance < SIFTConfig.RATIO_THRESH * n.distance:
                     good_matches.append(m)
 
-        if self.debug:
-            logger.debug(f"SIFT good matches: {len(good_matches)}")
+        logger.info(f"SIFT matching: {len(good_matches)} good matches found")
 
         if len(good_matches) < 4:
             return False, None
@@ -278,8 +280,7 @@ class SIFTModelDetectorMP:
                 if m.distance < 0.75 * n.distance:
                     good_matches.append(m)
 
-        if self.debug:
-            logger.debug(f"ORB good matches: {len(good_matches)}")
+        logger.info(f"ORB matching: {len(good_matches)} good matches found")
 
         if len(good_matches) < 4:
             return False, None
@@ -311,8 +312,7 @@ class SIFTModelDetectorMP:
             return False, None
 
         total = int(np.sum(mask_out))
-        if self.debug:
-            logger.debug(f'{method_name} inlier count: {total}')
+        logger.info(f"{method_name} homography computed with {total} inliers (threshold: {self.MIN_INLIER_COUNT})")
 
         if total >= self.MIN_INLIER_COUNT:
             self._update_homography(H, total, method_name)
@@ -322,9 +322,11 @@ class SIFTModelDetectorMP:
 
     def _update_homography(self, H, inlier_count, method_name):
         """Update stored homography and compute projected rectangle."""
+        logger.info(f"Map position updated: {method_name} detection with {inlier_count} inliers")
         self.H = H
         self.last_inlier_count = inlier_count
         self.requires_homography = False
+        self.last_validation_time = time.time()  # Reset validation timer
         self.tracking_quality_history.append(inlier_count)
         if len(self.tracking_quality_history) > 10:
             self.tracking_quality_history.pop(0)
@@ -339,8 +341,6 @@ class SIFTModelDetectorMP:
             self.last_rect_pts = None
 
         self.homography_updated = True
-        if self.debug:
-            logger.info(f"Homography locked using {method_name}")
 
     def quick_validate_position(self, scene_gray, min_matches=None, position_threshold=None):
         """

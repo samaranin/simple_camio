@@ -514,7 +514,7 @@ def run_main_loop(cap, components, workers, stop_event):
     frame_count = 0
     prof_start = time.time()
     prof_times = {'capture': 0, 'gray': 0, 'feed': 0, 'lock': 0, 'draw': 0, 'ui': 0, 'show': 0, 'key': 0, 'pyglet': 0}
-    PROF_INTERVAL = 10.0  # Log performance every 10 seconds
+    PROF_INTERVAL = 15.0  # Log performance every 15 seconds
     display_frame_counter = 0  # Counter for frame skip
     
     # Initialize display system
