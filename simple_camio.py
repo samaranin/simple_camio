@@ -496,6 +496,28 @@ def cleanup(cap, components, workers):
     """
     logger.info("Cleaning up resources...")
 
+    # Save collected tap data if enabled
+    try:
+        pose_detector = components.get('pose_detector')
+        if pose_detector and hasattr(pose_detector, 'data_collector'):
+            collector = pose_detector.data_collector
+            logger.debug(f"Data collector found: enabled={collector.enabled}, "
+                        f"total_collected={collector.total_collected}")
+            if collector.enabled and collector.total_collected > 0:
+                logger.info(f"Saving {collector.total_collected} collected tap samples...")
+                stats = collector.get_statistics()
+                logger.info(f"  Positive: {stats['positive_samples']}, "
+                          f"Negative: {stats['negative_samples']}")
+                filepath = collector.save_json()
+                if filepath:
+                    logger.info(f"Tap data saved to {filepath}")
+            elif collector.enabled and collector.total_collected == 0:
+                logger.info("Data collection was enabled but no samples were collected")
+        else:
+            logger.debug("No data collector found in pose_detector")
+    except Exception as e:
+        logger.error(f"Error saving collected tap data: {e}", exc_info=True)
+
     # Play goodbye message through audio worker before stopping it
     try:
         workers['audio_worker'].enqueue_command(AudioCommand('play_goodbye'))
