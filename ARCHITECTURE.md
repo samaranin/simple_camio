@@ -16,13 +16,15 @@ simple_camio/
 │
 ├── src/                            # Source code package
 │   ├── __init__.py
-│   ├── config.py                   # Centralized configuration (root level for easy access)
+│   ├── config.py                   # Centralized configuration
 │   │
 │   ├── core/                       # Core system components
 │   │   ├── __init__.py
 │   │   ├── utils.py               # Utility functions
-│   │   ├── workers.py             # Background worker threads
-│   │   └── interaction_policy.py  # Zone-based interaction logic
+│   │   ├── workers.py             # Background worker threads (Pose, SIFT, Audio)
+│   │   ├── interaction_policy.py  # Zone-based interaction logic
+│   │   ├── camera_thread.py       # Non-blocking camera capture thread
+│   │   └── display_thread.py      # Non-blocking display rendering thread
 │   │
 │   ├── detection/                 # Detection & tracking modules
 │   │   ├── __init__.py
@@ -67,13 +69,20 @@ simple_camio/
 ## Top-level Flow
 
 1. `simple_camio.py` loads a map model JSON and initializes components via `initialize_system()`.
-2. Camera is configured via `src.ui.display.setup_camera()`.
+2. Camera is configured via `src.ui.display.setup_camera()` (optionally wrapped in `ThreadedCamera`).
 3. Background workers are created with `create_worker_threads()`:
    - `PoseWorker` processes (frame, homography) tuples and updates latest pose/gesture results.
    - `SIFTWorker` processes grayscale frames: validates tracking and (re-)detects homography.
    - `AudioWorker` handles all audio commands asynchronously via an internal queue.
-4. The main loop (`run_main_loop`) captures frames, feeds worker queues, reads pose results, draws overlays using `src.ui.display` functions, processes gestures into audio commands, and handles keyboard input.
-5. `cleanup()` performs a graceful shutdown: stop workers, pause ambient sounds, release camera.
+4. The main loop (`run_main_loop`) captures frames (optionally via `ThreadedCamera`), feeds worker queues, reads pose results, draws overlays using `src.ui.display` functions, processes gestures into audio commands, displays frames (optionally via `DisplayThread`), and handles keyboard input.
+5. Helper functions break down the main loop:
+   - `initialize_display()` - Sets up display system (threaded or traditional)
+   - `capture_and_preprocess()` - Captures and converts frames
+   - `get_pose_results()` - Retrieves latest pose data from worker
+   - `process_map_detection()` - Handles map tracking and gesture processing
+   - `handle_display_and_input()` - Manages display and keyboard input
+   - `update_performance_stats()` - Logs performance metrics
+6. `cleanup()` performs a graceful shutdown: stop workers, stop display thread, pause ambient sounds, release camera.
 
 ## Module Descriptions
 
@@ -82,7 +91,7 @@ simple_camio/
 Centralized configuration module at the src root for easy importing.
 
 Main configuration classes:
-- `CameraConfig` - Camera settings (resolution, buffer, processing scale)
+- `CameraConfig` - Camera settings (resolution, buffer, processing scale, threaded capture/display)
 - `MovementFilterConfig` - Movement smoothing parameters
 - `GestureDetectorConfig` - Gesture detection thresholds
 - `TapDetectionConfig` - Comprehensive tap detection parameters
@@ -94,6 +103,8 @@ Main configuration classes:
 - `WorkerConfig` - Worker thread queue sizes and timeouts
 
 ### `src/core/` - Core System Components
+
+#### `utils.py`
 Utility helpers used throughout the system:
 - Camera helpers: `list_camera_ports()`, `select_camera_port()`
 - Map I/O: `load_map_parameters()`
@@ -107,6 +118,19 @@ Background worker threads for asynchronous processing:
 - `AudioWorker` - Non-blocking audio playback thread
 - `PoseWorker` - Hand pose detection worker (downscaled frames)
 - `SIFTWorker` - Template tracking and homography validation
+
+#### `camera_thread.py`
+Non-blocking camera capture:
+- `ThreadedCamera` - Background thread for camera frame capture
+- Eliminates camera I/O blocking from main loop
+- Configurable via `CameraConfig.USE_THREADED_CAPTURE`
+
+#### `display_thread.py`
+Non-blocking display rendering:
+- `DisplayThread` - Background thread for cv.imshow() operations
+- Queues frames for display without blocking main processing
+- Handles keyboard input asynchronously
+- Configurable via `CameraConfig.USE_THREADED_DISPLAY`
 
 #### `interaction_policy.py`
 Zone-based mapping from gestures to map zones:
@@ -178,11 +202,14 @@ Key functions and responsibilities:
 
 ## Threading and Performance Notes
 
-- Main thread: camera capture, UI rendering, event handling.
-- PoseWorker: downscaled detection; returns annotated image and a canonical gesture object.
-- SIFTWorker: full-resolution detection/validation and preprocessing attempts.
-- AudioWorker: single-threaded audio command processing to avoid blocking I/O.
+- **Main thread**: Camera capture (or reading from ThreadedCamera), UI rendering (or queuing to DisplayThread), event handling.
+- **ThreadedCamera** (optional): Background camera capture to eliminate I/O blocking from main loop. Enabled via `CameraConfig.USE_THREADED_CAPTURE`.
+- **DisplayThread** (optional): Background display rendering to eliminate cv.imshow() blocking from main loop. Enabled via `CameraConfig.USE_THREADED_DISPLAY`.
+- **PoseWorker**: Downscaled detection; returns annotated image and a canonical gesture object.
+- **SIFTWorker**: Full-resolution detection/validation and preprocessing attempts.
+- **AudioWorker**: Single-threaded audio command processing to avoid blocking I/O.
 - Queues for pose and SIFT use `WorkerConfig.POSE_QUEUE_MAXSIZE` and `SIFT_QUEUE_MAXSIZE` (defaults are 1) to keep only the latest frame and avoid backlog.
+- **Frame skipping**: `CameraConfig.DISPLAY_FRAME_SKIP` controls how often frames are displayed (less critical when using DisplayThread).
 
 ## Runtime Controls and Keys
 

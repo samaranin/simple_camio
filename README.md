@@ -9,7 +9,8 @@ Description: Simple CamIO 2D is a Python version of CamIO specialized to a flat,
 - **Double-Tap Support**: Reliable double-tap detection for triggering actions
 - **Spatial Audio**: Zone-based audio feedback with ambient soundscapes
 - **SIFT Tracking**: Robust map tracking using SIFT/ORB feature matching
-- **Data Collection**: Automatic collection of tap detection data for classifier training (NEW!)
+- **Threaded Architecture**: Non-blocking camera capture and display for high performance (400+ FPS)
+- **Data Collection**: Automatic collection of tap detection data for classifier training
 
 ## Data Collection and Classifier Training
 
@@ -109,12 +110,14 @@ simple_camio/
 │
 ├── src/                     # Source code package
 │   ├── __init__.py
-│   ├── config.py           # Centralized configuration (root for easy access)
+│   ├── config.py           # Centralized configuration
 │   │
 │   ├── core/               # Core components
 │   │   ├── utils.py        # Utility functions
-│   │   ├── workers.py      # Background worker threads
-│   │   └── interaction_policy.py  # Zone mapping logic
+│   │   ├── workers.py      # Background worker threads (Pose, SIFT, Audio)
+│   │   ├── interaction_policy.py  # Zone mapping logic
+│   │   ├── camera_thread.py       # Non-blocking camera capture
+│   │   └── display_thread.py      # Non-blocking display rendering
 │   │
 │   ├── detection/          # Detection & tracking
 │   │   ├── pose_detector.py      # Hand tracking and tap detection
@@ -172,13 +175,18 @@ For more details, see [TAP_CLASSIFIER_README.md](tap_classifier/TAP_CLASSIFIER_R
 ### Configuration
 
 All tunable parameters are centralized in `src/config.py`:
-- `CameraConfig` - Camera settings and processing scale
+- `CameraConfig` - Camera settings, processing scale, threaded capture/display options
 - `TapDetectionConfig` - Tap detection thresholds and hand size scaling
 - `SIFTConfig` - SIFT feature matching parameters
 - `MediaPipeConfig` - MediaPipe hand tracking settings
 - `AudioConfig` - Audio volume settings
 - `UIConfig` - UI overlay settings
 - `WorkerConfig` - Worker thread settings
+
+**Performance Tuning:**
+- Enable `USE_THREADED_CAPTURE=True` for non-blocking camera capture
+- Enable `USE_THREADED_DISPLAY=True` for non-blocking display (recommended for high FPS)
+- Adjust `DISPLAY_FRAME_SKIP` to control display rate (less critical with threaded display)
 
 ## Troubleshooting
 
@@ -195,9 +203,15 @@ All tunable parameters are centralized in `src/config.py`:
 - Try collecting real-world data and retraining the classifier
 
 **Performance issues:**
+- Enable threaded capture: `USE_THREADED_CAPTURE=True` in `CameraConfig`
+- Enable threaded display: `USE_THREADED_DISPLAY=True` in `CameraConfig`
 - Lower `POSE_PROCESSING_SCALE` in `CameraConfig` (default: 0.35)
 - Increase `REDETECT_INTERVAL` in `SIFTConfig` (default: 150 frames)
 - Reduce camera resolution
+
+**Expected Performance:**
+- With threaded capture and display enabled: 60+ FPS processing
+- Main loop should run smoothly without blocking on camera or display operations
 
 ## Documentation
 
