@@ -24,6 +24,7 @@ from src.detection.pose_detector import CombinedPoseDetector
 from src.detection.sift_detector import SIFTModelDetectorMP
 from src.core.interaction_policy import InteractionPolicy2D
 from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
+from src.core.display_thread import DisplayThread
 from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
 
 # Configure logging
@@ -318,6 +319,16 @@ def run_main_loop(cap, components, workers, stop_event):
     prof_times = {'capture': 0, 'gray': 0, 'feed': 0, 'lock': 0, 'draw': 0, 'ui': 0, 'show': 0, 'key': 0, 'pyglet': 0}
     PROF_INTERVAL = 10.0  # Log performance every 10 seconds
     display_frame_counter = 0  # Counter for frame skip
+    
+    # Initialize display thread if enabled
+    display_thread = None
+    if CameraConfig.USE_THREADED_DISPLAY:
+        display_thread = DisplayThread(window_name='image reprojection')
+        display_thread.start()
+        logger.info("DisplayThread enabled for non-blocking rendering")
+    else:
+        # Create window for non-threaded display
+        cv.namedWindow('image reprojection', cv.WINDOW_NORMAL)
 
     while cap.isOpened() and not stop_event.is_set():
         frame_start = time.time()
@@ -384,20 +395,26 @@ def run_main_loop(cap, components, workers, stop_event):
                                gesture_status, timer)
         prof_times['ui'] += time.time() - t
 
-        # Display the frame (with frame skipping for smoothness)
+        # Display the frame (threaded or direct)
         display_frame_counter += 1
         should_display = (display_frame_counter >= CameraConfig.DISPLAY_FRAME_SKIP)
         if should_display:
             display_frame_counter = 0
         
         t = time.time()
-        if should_display:
-            cv.imshow('image reprojection', display_img)
-            # Only call waitKey when we actually update the display
-            waitkey = cv.waitKey(1) & 0xFF
+        if CameraConfig.USE_THREADED_DISPLAY:
+            # Non-blocking display via thread
+            if should_display and display_thread:
+                display_thread.show(display_img)
+            # Get keyboard input from display thread
+            waitkey = display_thread.get_last_key() if display_thread else 255
         else:
-            # When not displaying, use minimal wait (0 = check events only)
-            waitkey = cv.waitKey(1) & 0xFF
+            # Blocking display (traditional)
+            if should_display:
+                cv.imshow('image reprojection', display_img)
+                waitkey = cv.waitKey(1) & 0xFF
+            else:
+                waitkey = cv.waitKey(1) & 0xFF
         prof_times['show'] += time.time() - t
         
         t = time.time()
@@ -425,6 +442,10 @@ def run_main_loop(cap, components, workers, stop_event):
             frame_count = 0
             prof_start = time.time()
             prof_times = {k: 0 for k in prof_times}
+    
+    # Stop display thread if it was started
+    if display_thread:
+        display_thread.stop()
 
 
 def cleanup(cap, components, workers):

@@ -29,6 +29,8 @@ from .interaction_policy import InteractionPolicy2D
 
 from .camera_thread import ThreadedCamera
 
+from .display_thread import DisplayThread
+
 __all__ = [
     # Utilities
     'select_camera_port',
@@ -46,4 +48,6 @@ __all__ = [
     'InteractionPolicy2D',
     # Camera
     'ThreadedCamera',
+    # Display
+    'DisplayThread',
 ]

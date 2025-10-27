@@ -34,10 +34,15 @@ class CameraConfig:
     # Use threaded camera capture (can improve FPS significantly)
     USE_THREADED_CAPTURE = True
     
+    # Use threaded display (non-blocking cv.imshow for smoother rendering)
+    # Highly recommended for high FPS systems
+    USE_THREADED_DISPLAY = True
+    
     # Display frame skip - show every Nth frame to improve smoothness
     # Higher = smoother but lower display FPS (processing still happens on all frames)
     # 1 = show all frames, 2 = show every other frame, etc.
     # Recommended: 3-5 for high FPS cameras to avoid cv.imshow() blocking
+    # NOTE: Less important when USE_THREADED_DISPLAY=True
     DISPLAY_FRAME_SKIP = 4
     
     # Camera backend to use (None for default, or cv.CAP_DSHOW, cv.CAP_MSMF, cv.CAP_ANY)
