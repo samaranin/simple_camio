@@ -51,6 +51,8 @@ class TapDetectionConfig:
 ```
 Then import: `from config import TapDetectionConfig`
 
+Available config classes: `CameraConfig`, `MovementFilterConfig`, `GestureDetectorConfig`, `TapDetectionConfig`, `InteractionConfig`, `SIFTConfig`, `MediaPipeConfig`, `AudioConfig`, `UIConfig`, `WorkerConfig`
+
 ### 3. Worker Communication Pattern
 ```python
 # Enqueue (non-blocking, drop if full)
@@ -69,6 +71,17 @@ Three concurrent detection methods fused in `CombinedPoseDetector`:
 - **Enhanced**: Palm plane penetration, relative depth, ray velocity
 
 A tap requires: `(base_detector OR enhanced_detector) AND tap_classifier AND rule_validation`
+
+### 5. Data Collection for Classifier Training
+Enable automatic collection of tap data for model improvement:
+```python
+# In config.py
+class TapDetectionConfig:
+    COLLECT_TAP_DATA = True  # Enable collection
+    TAP_DATA_DIR = 'data/tap_dataset'  # Save location
+```
+Train on collected data: `python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset`
+See `tap_classifier/DATA_COLLECTION_GUIDE.md` for full workflow.
 
 ### 5. Map Model JSON Structure
 ```json
@@ -91,8 +104,16 @@ Color values are exact RGB matches (no tolerance). Template must show full map w
 1. Add config to `TapDetectionConfig` in `config.py`
 2. Add feature extraction in `_extract_classifier_features()` in `pose_detector.py`
 3. Update `TapClassifier.feature_names` in `tap_classifier/tap_classifier.py`
-4. Retrain: `python train_tap_classifier.py --train --samples 2000`
+4. Retrain: `python tap_classifier/train_tap_classifier.py --train --samples 2000 --learning-rate 0.02 --epochs 5`
 5. Test manually: observe logs at DEBUG level for feature values
+
+### Collecting Real-World Tap Data
+1. Enable in `config.py`: `TapDetectionConfig.COLLECT_TAP_DATA = True`
+2. Run normally: `python simple_camio.py`
+3. Data auto-saves to `data/tap_dataset/tap_data_YYYYMMDD_HHMMSS.json`
+4. Train on your data: `python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset`
+5. Merge sessions (optional): `python tap_classifier/train_tap_classifier.py --merge-datasets --data-dir ../data/tap_dataset --output merged.json`
+6. Model personalizes to your tap style over time
 
 ### Debugging Tap Detection Issues
 ```python
@@ -106,11 +127,12 @@ Watch for:
 - `Classifier trained on successful tap` (online learning working)
 
 ### Testing New Models
-```bash
+```powershell
 python simple_camio.py --input1 models/TestDemo/demo_map.json
 ```
 Press `h` to force map re-detection if tracking lost.
 Press `b` to toggle zone transition blips for testing audio zones.
+Press `q` or `ESC` to quit.
 
 ### Performance Optimization
 Check `CameraConfig.POSE_PROCESSING_SCALE` (default 0.35). Lower = faster but less accurate.
@@ -147,16 +169,32 @@ from utils import ...  # Project utilities
 
 ### Quick Smoke Test
 ```powershell
+# Test imports work correctly
 python -c "from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP; print('Import successful!')"
-python simple_camio.py  # Should auto-detect camera and load default UkraineMap
+
+# Run with default UkraineMap (auto-detects camera)
+python simple_camio.py
 ```
 
 ### Tap Classifier Training
 ```powershell
-cd tap_classifier
-python train_tap_classifier.py --train --samples 1000
-python train_tap_classifier.py --evaluate
-python train_tap_classifier.py --feature-importance
+# Train on synthetic data
+python tap_classifier/train_tap_classifier.py --train --samples 1000
+
+# Evaluate trained model
+python tap_classifier/train_tap_classifier.py --evaluate
+
+# Show feature importance
+python tap_classifier/train_tap_classifier.py --feature-importance
+
+# Train with custom parameters
+python tap_classifier/train_tap_classifier.py --train --samples 2000 --learning-rate 0.02 --epochs 5
+
+# Train from collected real-world data
+python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset
+
+# Merge multiple collection sessions
+python tap_classifier/train_tap_classifier.py --merge-datasets --data-dir ../data/tap_dataset --output merged.json
 ```
 
 ### Running Tests
@@ -204,6 +242,7 @@ No formal test suite yet. Manual testing via:
 - **Tracking problems**: `sift_detector.py`, `SIFTConfig` in config.py
 - **Adding features**: `ARCHITECTURE.md` (data flow), then relevant detector/worker
 - **Performance**: `CameraConfig`, worker queue sizes in `WorkerConfig`
+- **Data collection**: `tap_classifier/DATA_COLLECTION_GUIDE.md`, `TapDetectionConfig.COLLECT_TAP_DATA`
 
 ## Dependency Versions (Critical)
 
@@ -218,20 +257,35 @@ When updating dependencies, test tap detection immediately - MediaPipe landmark 
 ## Quick Command Reference
 
 ```powershell
-# Run with default map
+# Run with default map (UkraineMap)
 python simple_camio.py
 
 # Run with custom map
 python simple_camio.py --input1 models/RivneMap/RivneMap.json
 
-# Train classifier
+# Train classifier on synthetic data
 python tap_classifier/train_tap_classifier.py --train --samples 1000
+
+# Train on collected real-world data
+python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset
+
+# Evaluate trained model
+python tap_classifier/train_tap_classifier.py --evaluate
+
+# Show feature importance
+python tap_classifier/train_tap_classifier.py --feature-importance
+
+# Merge collected datasets
+python tap_classifier/train_tap_classifier.py --merge-datasets --data-dir ../data/tap_dataset --output merged.json
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-**In-app controls**: `q`/`ESC`=quit, `h`=redetect map, `b`=toggle blips
+**In-app controls**: 
+- `q` or `ESC` = quit
+- `h` = manually re-detect map
+- `b` = toggle zone transition blips
 
 ---
 
