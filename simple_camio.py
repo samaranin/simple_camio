@@ -316,6 +316,7 @@ def run_main_loop(cap, components, workers, stop_event):
     frame_count = 0
     prof_start = time.time()
     prof_times = {'capture': 0, 'gray': 0, 'feed': 0, 'lock': 0, 'draw': 0, 'ui': 0, 'show': 0, 'key': 0, 'pyglet': 0}
+    PROF_INTERVAL = 10.0  # Log performance every 10 seconds
 
     while cap.isOpened() and not stop_event.is_set():
         frame_start = time.time()
@@ -402,14 +403,16 @@ def run_main_loop(cap, components, workers, stop_event):
         prof_times['pyglet'] += time.time() - t
 
         frame_count += 1
-        # Print profiling every 100 frames
-        if frame_count % 100 == 0:
-            elapsed = time.time() - prof_start
-            logger.info(f"=== Performance (last 100 frames, {elapsed:.2f}s, {100/elapsed:.1f} FPS) ===")
+        # Print profiling every 10 seconds
+        elapsed = time.time() - prof_start
+        if elapsed >= PROF_INTERVAL:
+            fps = frame_count / elapsed
+            logger.info(f"=== Performance (last {frame_count} frames, {elapsed:.1f}s, {fps:.1f} FPS) ===")
             for key, val in prof_times.items():
                 pct = 100 * val / elapsed
                 logger.info(f"  {key:10s}: {val*1000:.1f}ms ({pct:.1f}%)")
             # Reset counters
+            frame_count = 0
             prof_start = time.time()
             prof_times = {k: 0 for k in prof_times}
 
