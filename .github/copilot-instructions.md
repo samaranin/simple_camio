@@ -49,7 +49,7 @@ When tuning detection in `TapDetectionConfig`, always consider reference size is
 class TapDetectionConfig:
     TAP_MIN_DURATION = 0.05  # Centralized, documented
 ```
-Then import: `from config import TapDetectionConfig`
+Then import: `from src.config import TapDetectionConfig`
 
 Available config classes: `CameraConfig`, `MovementFilterConfig`, `GestureDetectorConfig`, `TapDetectionConfig`, `InteractionConfig`, `SIFTConfig`, `MediaPipeConfig`, `AudioConfig`, `UIConfig`, `WorkerConfig`
 
@@ -145,8 +145,10 @@ Monitor `SIFTConfig.REDETECT_INTERVAL` (150 frames default). Higher = less CPU b
 import cv2 as cv  # Always "cv" not "cv2"
 import numpy as np
 import mediapipe as mp
-from config import *Config  # Import specific config classes
-from utils import ...  # Project utilities
+from src.config import *Config  # Configuration at src root
+from src.core.utils import ...  # Core utilities
+from src.detection import ...  # Detection modules
+from src.audio.audio import ...  # Audio components
 ```
 
 ### Naming Conventions
@@ -237,12 +239,12 @@ No formal test suite yet. Manual testing via:
 
 ## When to Read These Files
 
-- **Tuning detection**: `config.py` (all thresholds), `pose_detector.py` (detector logic)
-- **Audio issues**: `audio.py`, `workers.py` (AudioWorker)
-- **Tracking problems**: `sift_detector.py`, `SIFTConfig` in config.py
+- **Tuning detection**: `src/config.py` (all thresholds), `src/detection/pose_detector.py` (detector logic)
+- **Audio issues**: `src/audio/audio.py`, `src/core/workers.py` (AudioWorker)
+- **Tracking problems**: `src/detection/sift_detector.py`, `SIFTConfig` in src/config.py
 - **Adding features**: `ARCHITECTURE.md` (data flow), then relevant detector/worker
-- **Performance**: `CameraConfig`, worker queue sizes in `WorkerConfig`
-- **Data collection**: `tap_classifier/DATA_COLLECTION_GUIDE.md`, `TapDetectionConfig.COLLECT_TAP_DATA`
+- **Performance**: `CameraConfig` in src/config.py, worker queue sizes in `WorkerConfig`
+- **Data collection**: `src/tap_classifier/DATA_COLLECTION_GUIDE.md`, `TapDetectionConfig.COLLECT_TAP_DATA`
 
 ## Dependency Versions (Critical)
 

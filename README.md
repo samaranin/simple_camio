@@ -94,33 +94,58 @@ To use, simply make a pointing gesture by extending the index finger out and cur
 
 4. **Verify installation:**
    ```powershell
-   python -c "from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP; print('Installation successful!')"
+   python -c "from src.detection import CombinedPoseDetector, SIFTModelDetectorMP; print('Installation successful!')"
    ```
 
 ## Project Structure
 
 ```
 simple_camio/
-├── simple_camio.py           # Main entry point
-├── config.py                 # Centralized configuration
-├── pose_detector.py          # Hand tracking and tap detection
-├── sift_detector.py          # SIFT-based map tracking
-├── workers.py                # Background worker threads
-├── audio.py                  # Audio playback components
-├── gesture_detection.py      # Movement filtering and gesture analysis
-├── interaction_policy.py     # Zone mapping logic
-├── utils.py                  # Utility functions
-├── models/                   # Map configurations
-│   ├── UkraineMap/          # Default map
-│   ├── RivneMap/            # Alternative map
-│   └── TestDemo/            # Demo map
-├── tap_classifier/          # ML-based tap classification
-│   ├── train_tap_classifier.py
-│   ├── tap_classifier.py
-│   ├── DATA_COLLECTION_GUIDE.md
-│   └── TAP_CLASSIFIER_README.md
-└── data/
-    └── tap_dataset/         # Collected tap data for training
+├── simple_camio.py           # Main entry point (clean, UI-focused)
+├── requirements.txt          # Python dependencies
+├── README.md                 # This file
+├── ARCHITECTURE.md           # Detailed architecture documentation
+├── LAUNCH_GUIDE.md          # Launch instructions
+│
+├── src/                     # Source code package
+│   ├── __init__.py
+│   ├── config.py           # Centralized configuration (root for easy access)
+│   │
+│   ├── core/               # Core components
+│   │   ├── utils.py        # Utility functions
+│   │   ├── workers.py      # Background worker threads
+│   │   └── interaction_policy.py  # Zone mapping logic
+│   │
+│   ├── detection/          # Detection & tracking
+│   │   ├── pose_detector.py      # Hand tracking and tap detection
+│   │   ├── sift_detector.py      # SIFT-based map tracking
+│   │   └── gesture_detection.py  # Movement filtering
+│   │
+│   ├── audio/              # Audio playback
+│   │   └── audio.py        # Audio players
+│   │
+│   ├── ui/                 # User interface
+│   │   └── display.py      # Drawing and overlays
+│   │
+│   └── tap_classifier/     # ML tap classification
+│       ├── train_tap_classifier.py
+│       ├── tap_classifier.py
+│       ├── DATA_COLLECTION_GUIDE.md
+│       └── TAP_CLASSIFIER_README.md
+│
+├── models/                  # Map configurations
+│   ├── UkraineMap/         # Default map
+│   ├── RivneMap/           # Alternative map
+│   └── TestDemo/           # Demo map
+│
+├── data/
+│   └── tap_dataset/        # Collected tap data for training
+│
+├── tests/                  # Unit tests (future)
+│
+└── legacy/                 # Legacy compatibility files
+    ├── simple_camio_2d.py
+    └── simple_camio_mp.py
 ```
 
 ## Advanced Features
@@ -146,7 +171,7 @@ For more details, see [TAP_CLASSIFIER_README.md](tap_classifier/TAP_CLASSIFIER_R
 
 ### Configuration
 
-All tunable parameters are centralized in `config.py`:
+All tunable parameters are centralized in `src/config.py`:
 - `CameraConfig` - Camera settings and processing scale
 - `TapDetectionConfig` - Tap detection thresholds and hand size scaling
 - `SIFTConfig` - SIFT feature matching parameters

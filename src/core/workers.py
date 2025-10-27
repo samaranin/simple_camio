@@ -10,8 +10,8 @@ import queue
 import time
 import cv2 as cv
 import logging
-from config import WorkerConfig
-from utils import normalize_gesture_location
+from src.config import WorkerConfig
+from src.core.utils import normalize_gesture_location
 
 logger = logging.getLogger(__name__)
 

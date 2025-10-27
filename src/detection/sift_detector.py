@@ -8,7 +8,7 @@ using SIFT feature matching and homography estimation.
 import numpy as np
 import cv2 as cv
 import logging
-from config import SIFTConfig
+from src.config import SIFTConfig
 
 logger = logging.getLogger(__name__)
 

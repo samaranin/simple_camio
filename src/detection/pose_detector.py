@@ -62,9 +62,9 @@ from collections import deque
 import time
 import logging
 from google.protobuf.json_format import MessageToDict
-from config import MediaPipeConfig, TapDetectionConfig
-from tap_classifier import TapClassifier
-from tap_classifier.tap_data_collector import create_collector_from_config
+from src.config import MediaPipeConfig, TapDetectionConfig
+from src.tap_classifier import TapClassifier
+from src.tap_classifier.tap_data_collector import create_collector_from_config
 
 logger = logging.getLogger(__name__)
 
