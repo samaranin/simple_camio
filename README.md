@@ -2,6 +2,28 @@ Simple CamIO 2D
 
 Description: Simple CamIO 2D is a Python version of CamIO specialized to a flat, rectangular model such as a tactile map. This version relies on finger/hand tracking rather than the use of a stylus.
 
+## Features
+
+- **Hand Tracking**: MediaPipe-based hand pose detection with adaptive thresholds
+- **Tap Detection**: Multi-modal tap recognition (Z-depth, angle, palm plane penetration)
+- **Double-Tap Support**: Reliable double-tap detection for triggering actions
+- **Spatial Audio**: Zone-based audio feedback with ambient soundscapes
+- **SIFT Tracking**: Robust map tracking using SIFT/ORB feature matching
+- **Data Collection**: Automatic collection of tap detection data for classifier training (NEW!)
+
+## Data Collection and Classifier Training
+
+Simple CamIO can now automatically collect tap detection data while you use the program. This allows you to train the tap classifier on your real-world usage patterns for improved accuracy!
+
+**Quick Start:**
+
+1. Enable in `config.py`: `TapDetectionConfig.COLLECT_TAP_DATA = True`
+2. Run the program normally: `python simple_camio.py`
+3. Perform taps as usual - data is collected automatically
+4. Train on your data: `cd tap_classifier && python train_tap_classifier.py --train-from-collected`
+
+For detailed instructions, see [DATA_COLLECTION_GUIDE.md](tap_classifier/DATA_COLLECTION_GUIDE.md).
+
 Requirements: To run Simple CamIO 2D, one needs to set up several things. 
 - Firstly, There needs to be a json file that defines a model, that is it describes the components of an interactive map.  It contains the filenames of the various components of a model, as well as other important information such as the hotspot dictionary.  An example we recommend using as reference is models\UkraineMap\UkraineMap.json.
 

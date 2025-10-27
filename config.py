@@ -166,6 +166,12 @@ class TapDetectionConfig:
     ALLOW_TAP_WHILE_MOVING = True   # Enable tap detection during non-pointing gestures
     MOVING_TAP_TRIGGER_COUNT = 3    # Require more concurrent triggers when not pointing (stricter)
 
+    # ==================== Data Collection ====================
+    # Automatic dataset collection during runtime for classifier training
+    COLLECT_TAP_DATA = False        # Enable/disable automatic data collection
+    TAP_DATA_DIR = 'data/tap_dataset'  # Directory to save collected tap data
+    MAX_COLLECTED_SAMPLES = 10000   # Maximum number of samples to collect per session
+
 
 # ==================== Interaction Policy Configuration ====================
 class InteractionConfig:

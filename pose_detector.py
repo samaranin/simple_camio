@@ -64,6 +64,7 @@ import logging
 from google.protobuf.json_format import MessageToDict
 from config import MediaPipeConfig, TapDetectionConfig
 from tap_classifier import TapClassifier
+from tap_classifier.tap_data_collector import create_collector_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,9 @@ class PoseDetectorMP:
 
         # Load tap detection configuration
         self._load_tap_config()
+
+        # Initialize data collector
+        self.data_collector = create_collector_from_config()
 
         logger.info("Initialized MediaPipe pose detector")
         # Cache for reusing MP results (results object and frame dims)
@@ -912,6 +916,10 @@ class PoseDetectorMP:
             return self._process_valid_tap(state, now, pos_x, pos_y, press_duration,
                                           depth_z, depth_ang, xy_drift, draw, img_out, thresholds)
         else:
+            # Collect negative example when tap validation fails
+            reason = self._determine_rejection_reason(press_duration, xy_drift, depth_z, depth_ang, thresholds)
+            self._collect_tap_data_negative(state, thresholds, press_duration, xy_drift, 
+                                           depth_z, depth_ang, reason)
             state['pressing'] = False
 
         return False
@@ -961,6 +969,9 @@ class PoseDetectorMP:
                   f"drift={drift:.1f}, scale={thresholds['scale_factor']:.2f}, "
                   f"velScale={thresholds.get('velocity_scale', 1.0):.2f}, "
                   f"palmWidth={thresholds['palm_width']:.1f}px")
+
+        # Collect positive tap example (when tap is confirmed)
+        self._collect_tap_data_positive(state, thresholds, duration, drift, depth_z, depth_ang)
 
         last_tap = state.get('last_tap', 0.0)
         gap = now - last_tap if last_tap > 0.0 else 1e9
@@ -1071,6 +1082,146 @@ class PoseDetectorMP:
             return None, None, None
         ow, oh = self._last_frame_dims[0], self._last_frame_dims[1]
         return self._last_mp_results, ow, oh
+    
+    # ==================== Data Collection Methods ====================
+    
+    def _determine_rejection_reason(self, duration, drift, depth_z, depth_ang, thresholds):
+        """
+        Determine why a tap was rejected for data collection metadata.
+        
+        Args:
+            duration (float): Press duration
+            drift (float): XY drift
+            depth_z (float): Z-depth
+            depth_ang (float): Angle depth
+            thresholds (dict): Scaled thresholds
+            
+        Returns:
+            str: Rejection reason
+        """
+        reasons = []
+        
+        if duration < self.TAP_MIN_DURATION:
+            reasons.append('too_short')
+        elif duration > self.TAP_MAX_DURATION:
+            reasons.append('too_long')
+        
+        if drift > thresholds['tap_max_xy_drift']:
+            reasons.append('excessive_drift')
+        
+        if depth_z < thresholds['tap_min_press_depth'] and depth_ang < thresholds['ang_min_press_depth']:
+            reasons.append('insufficient_depth')
+        
+        return '_'.join(reasons) if reasons else 'unknown'
+    
+    def _collect_tap_data_positive(self, state, thresholds, duration, drift, depth_z, depth_ang):
+        """
+        Collect positive tap example for training data.
+        
+        Args:
+            state (dict): Tap state dictionary
+            thresholds (dict): Scaled thresholds
+            duration (float): Tap duration
+            drift (float): XY drift
+            depth_z (float): Z-depth
+            depth_ang (float): Angle depth
+        """
+        if not self.data_collector.enabled:
+            return
+        
+        logger.debug(f"Collecting positive tap data: depth_z={depth_z:.4f}, "
+                    f"depth_ang={depth_ang:.1f}, duration={duration:.3f}")
+        
+        try:
+            # Extract features from base detector state
+            features = np.array([
+                0.0,  # zrel_depth (not available in base)
+                0.0,  # plane_depth (not available in base)
+                depth_ang,  # ang_depth
+                depth_z,  # z_depth
+                drift,  # drift
+                0.0,  # vzrel (not available in base)
+                0.0,  # vplane (not available in base)
+                state.get('peak_angle_depth', 0.0) / duration if duration > 0 else 0.0,  # vang estimate
+                depth_z / duration if duration > 0 else 0.0,  # vz estimate
+                0.0,  # ray_vel (not available in base)
+                duration,  # duration
+                thresholds.get('scale_factor', 1.0),  # scale_factor
+                thresholds.get('palm_width', 180.0),  # palm_width
+                2,  # trigger_count (base uses 2 methods: z and angle)
+                0.0,  # depth_ratio (computed by collector)
+                0.0,  # vel_consistency (computed by collector)
+                0.0,  # spatial_stability (computed by collector)
+                0.0,  # temporal_fitness (computed by collector)
+            ], dtype=float)
+            
+            # Collect positive example
+            metadata = {
+                'detector': 'base',
+                'press_mode': state.get('press_mode', 'unknown'),
+                'depth_z': float(depth_z),
+                'depth_ang': float(depth_ang)
+            }
+            
+            self.data_collector.collect_positive(features, metadata)
+            
+        except Exception as e:
+            logger.debug(f"Failed to collect positive tap data: {e}")
+    
+    def _collect_tap_data_negative(self, state, thresholds, duration, drift, depth_z, depth_ang, reason):
+        """
+        Collect negative tap example (rejected gesture) for training data.
+        
+        Args:
+            state (dict): Tap state dictionary
+            thresholds (dict): Scaled thresholds
+            duration (float): Press duration
+            drift (float): XY drift
+            depth_z (float): Z-depth
+            depth_ang (float): Angle depth
+            reason (str): Reason for rejection
+        """
+        if not self.data_collector.enabled:
+            return
+        
+        logger.debug(f"Collecting negative tap data: reason={reason}, "
+                    f"depth_z={depth_z:.4f}, drift={drift:.1f}")
+        
+        try:
+            # Extract features similar to positive collection
+            features = np.array([
+                0.0,  # zrel_depth (not available in base)
+                0.0,  # plane_depth (not available in base)
+                depth_ang,  # ang_depth
+                depth_z,  # z_depth
+                drift,  # drift
+                0.0,  # vzrel
+                0.0,  # vplane
+                depth_ang / duration if duration > 0 else 0.0,  # vang estimate
+                depth_z / duration if duration > 0 else 0.0,  # vz estimate
+                0.0,  # ray_vel
+                duration,  # duration
+                thresholds.get('scale_factor', 1.0),  # scale_factor
+                thresholds.get('palm_width', 180.0),  # palm_width
+                1,  # trigger_count (failed taps typically have fewer triggers)
+                0.0,  # depth_ratio
+                0.0,  # vel_consistency
+                0.0,  # spatial_stability
+                0.0,  # temporal_fitness
+            ], dtype=float)
+            
+            # Collect negative example
+            metadata = {
+                'detector': 'base',
+                'reason': reason,
+                'depth_z': float(depth_z),
+                'depth_ang': float(depth_ang)
+            }
+            
+            self.data_collector.collect_negative(features, metadata)
+            
+        except Exception as e:
+            logger.debug(f"Failed to collect negative tap data: {e}")
 
 
 class PoseDetectorMPEnhanced(PoseDetectorMP):
@@ -1862,6 +2013,13 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 logger.debug(f"Tap classifier: prob={prob:.3f}, threshold={self.CLS_MIN_PROB:.3f}, "
                            f"rule_valid={valid_rule}, cls_valid={valid_classifier}")
 
+                # Collect negative example if validation fails
+                if not (valid_rule and valid_classifier):
+                    reason = self._determine_enhanced_rejection_reason(
+                        duration, drift, st, thresholds, valid_rule, valid_classifier
+                    )
+                    self._collect_enhanced_tap_data_negative(st, features, reason)
+
                 # Use both rule-based and classifier validation
                 return valid_rule and valid_classifier
 
@@ -1871,12 +2029,26 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
                                  drift, abs(velocities['vzrel']), abs(velocities['vplane']), duration], dtype=float)
                 prob = self._tiny_cls_prob(feats)
+                
+                # Collect negative if failed
+                if not (valid_rule and (prob >= self.CLS_MIN_PROB)):
+                    reason = 'classifier_rejected' if not (prob >= self.CLS_MIN_PROB) else 'rule_rejected'
+                    if hasattr(st, '_last_features'):
+                        self._collect_enhanced_tap_data_negative(st, st['_last_features'], reason)
+                
                 return valid_rule and (prob >= self.CLS_MIN_PROB)
         else:
             # Fallback to original tiny classifier if main classifier not available
             feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
                              drift, abs(velocities['vzrel']), abs(velocities['vplane']), duration], dtype=float)
             prob = self._tiny_cls_prob(feats)
+            
+            # Collect negative if failed
+            if not (valid_rule and (prob >= self.CLS_MIN_PROB)):
+                reason = 'classifier_rejected' if not (prob >= self.CLS_MIN_PROB) else 'rule_rejected'
+                if hasattr(st, '_last_features'):
+                    self._collect_enhanced_tap_data_negative(st, st['_last_features'], reason)
+            
             return valid_rule and (prob >= self.CLS_MIN_PROB)
 
     def _extract_classifier_features(self, st, velocities, thresholds, duration, drift):
@@ -1972,6 +2144,10 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 cv.putText(img_out, "DOUBLE TAP", (int(pos_x), int(pos_y) - 10),
                           cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
+            # Collect positive tap example
+            if hasattr(st, '_last_features'):
+                self._collect_enhanced_tap_data_positive(st, st['_last_features'])
+            
             # Train classifier on successful double tap (positive example)
             if self.tap_classifier is not None and hasattr(st, '_last_features'):
                 try:
@@ -2013,6 +2189,106 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         def L(i):
             lm = hand_landmarks.landmark[i]
             return np.array([lm.x, lm.y, lm.z], dtype=float)
+    
+    # ==================== Enhanced Data Collection Methods ====================
+    
+    def _determine_enhanced_rejection_reason(self, duration, drift, st, thresholds, 
+                                             valid_rule, valid_classifier):
+        """
+        Determine why an enhanced tap was rejected.
+        
+        Args:
+            duration (float): Press duration
+            drift (float): XY drift
+            st (dict): Enhanced state
+            thresholds (dict): Scaled thresholds
+            valid_rule (bool): Whether rule-based validation passed
+            valid_classifier (bool): Whether classifier validation passed
+            
+        Returns:
+            str: Rejection reason
+        """
+        reasons = []
+        
+        if not valid_classifier:
+            reasons.append('classifier_rejected')
+        
+        if not valid_rule:
+            if duration < self.TAP_MIN_DURATION:
+                reasons.append('too_short')
+            elif duration > self.TAP_MAX_DURATION:
+                reasons.append('too_long')
+            
+            if drift > thresholds['tap_max_xy_drift']:
+                reasons.append('excessive_drift')
+            
+            all_depths_low = (
+                st['peak_zrel_depth'] < thresholds['zrel_min_press_depth'] and
+                st['peak_plane_depth'] < thresholds['plane_min_press_depth'] and
+                st['peak_ang_depth'] < thresholds['ang_min_press_depth']
+            )
+            if all_depths_low:
+                reasons.append('insufficient_depth')
+        
+        return '_'.join(reasons) if reasons else 'unknown'
+    
+    def _collect_enhanced_tap_data_positive(self, st, features):
+        """
+        Collect positive tap example from enhanced detector.
+        
+        Args:
+            st (dict): Enhanced state
+            features (numpy.ndarray): Feature vector
+        """
+        if not self.data_collector.enabled:
+            return
+        
+        try:
+            metadata = {
+                'detector': 'enhanced',
+                'zrel_depth': float(st.get('peak_zrel_depth', 0.0)),
+                'plane_depth': float(st.get('peak_plane_depth', 0.0)),
+                'ang_depth': float(st.get('peak_ang_depth', 0.0))
+            }
+            
+            self.data_collector.collect_positive(features, metadata)
+            
+        except Exception as e:
+            logger.debug(f"Failed to collect enhanced positive tap data: {e}")
+    
+    def _collect_enhanced_tap_data_negative(self, st, features, reason):
+        """
+        Collect negative tap example from enhanced detector.
+        
+        Args:
+            st (dict): Enhanced state
+            features (numpy.ndarray): Feature vector
+            reason (str): Rejection reason
+        """
+        if not self.data_collector.enabled:
+            return
+        
+        try:
+            metadata = {
+                'detector': 'enhanced',
+                'reason': reason,
+                'zrel_depth': float(st.get('peak_zrel_depth', 0.0)),
+                'plane_depth': float(st.get('peak_plane_depth', 0.0)),
+                'ang_depth': float(st.get('peak_ang_depth', 0.0))
+            }
+            
+            self.data_collector.collect_negative(features, metadata)
+            
+        except Exception as e:
+            logger.debug(f"Failed to collect enhanced negative tap data: {e}")
+    
+    # ---------- Stronger pointing gate (continued) ----------
+    def _strong_pointing_gate(self, hand_landmarks, w, h):
+        """Stricter pointing gate using extension ratios of each finger."""
+        def L(i):
+            lm = hand_landmarks.landmark[i]
+            return np.array([lm.x, lm.y, lm.z], dtype=float)
+        
         idx = np.array([L(i) for i in [5, 6, 7, 8]])
         mid = np.array([L(i) for i in [9, 10, 11, 12]])
         rng = np.array([L(i) for i in [13, 14, 15, 16]])
@@ -2056,11 +2332,29 @@ class CombinedPoseDetector:
         self.base = PoseDetectorMP(model)
         self.enh = PoseDetectorMPEnhanced(model)
         
+        # Share the same data collector between both detectors
+        # This ensures all collected samples go to one place
+        shared_collector = self.enh.data_collector
+        self.base.data_collector = shared_collector
+        
         # Tell enhanced to use cached base outputs instead of calling super()
         self.enh._skip_super = True
         
         # Propagate image (for downstream tools that may inspect it)
         self.image_map_color = self.base.image_map_color
+    
+    @property
+    def data_collector(self):
+        """
+        Get the data collector from the enhanced detector.
+        
+        The enhanced detector collects more comprehensive features,
+        so we prioritize its collector. Falls back to base if needed.
+        
+        Returns:
+            TapDataCollector: The data collector instance
+        """
+        return self.enh.data_collector if hasattr(self.enh, 'data_collector') else self.base.data_collector
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
         """
