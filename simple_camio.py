@@ -317,6 +317,7 @@ def run_main_loop(cap, components, workers, stop_event):
     prof_start = time.time()
     prof_times = {'capture': 0, 'gray': 0, 'feed': 0, 'lock': 0, 'draw': 0, 'ui': 0, 'show': 0, 'key': 0, 'pyglet': 0}
     PROF_INTERVAL = 10.0  # Log performance every 10 seconds
+    display_frame_counter = 0  # Counter for frame skip
 
     while cap.isOpened() and not stop_event.is_set():
         frame_start = time.time()
@@ -383,17 +384,26 @@ def run_main_loop(cap, components, workers, stop_event):
                                gesture_status, timer)
         prof_times['ui'] += time.time() - t
 
-        # Display the frame
-        t = time.time()
-        cv.imshow('image reprojection', display_img)
+        # Display the frame (with frame skipping for smoothness)
+        display_frame_counter += 1
+        should_display = (display_frame_counter >= CameraConfig.DISPLAY_FRAME_SKIP)
+        if should_display:
+            display_frame_counter = 0
         
-        # Handle keyboard input (combine waitKey with input handling)
-        waitkey = cv.waitKey(1) & 0xFF
+        t = time.time()
+        if should_display:
+            cv.imshow('image reprojection', display_img)
+            # Only call waitKey when we actually update the display
+            waitkey = cv.waitKey(1) & 0xFF
+        else:
+            # When not displaying, use minimal wait (0 = check events only)
+            waitkey = cv.waitKey(1) & 0xFF
         prof_times['show'] += time.time() - t
         
         t = time.time()
-        if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
-            break
+        if waitkey != 255:  # 255 means no key pressed
+            if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+                break
         prof_times['key'] += time.time() - t
 
         # Update Pyglet event loop
