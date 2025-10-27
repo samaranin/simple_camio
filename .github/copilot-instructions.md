@@ -1,0 +1,238 @@
+# Simple CamIO - AI Agent Instructions
+
+## Project Overview
+
+Simple CamIO is a **computer vision-based assistive technology** that enables vision-impaired users to explore tactile maps through hand gestures. It combines MediaPipe hand tracking, SIFT-based map detection, multi-modal tap recognition, and spatial audio feedback to create an interactive map exploration experience.
+
+**Branch**: `double_tap_detection_helper` - Active development of enhanced tap detection using ML classifier.
+
+## Architecture Quick Reference
+
+### Threading Model (Critical)
+- **Main thread**: Camera capture, UI rendering, keyboard input (`simple_camio.py`)
+- **PoseWorker**: Downscaled (0.35x) hand pose detection with tap analysis
+- **SIFTWorker**: Full-resolution map tracking and homography validation
+- **AudioWorker**: Non-blocking audio playback via command queue
+
+**Key insight**: Queues are size=1 by default to avoid backlog and keep only latest frame. Never batch-process old frames.
+
+### Data Flow
+```
+Camera → Gray frame → SIFTWorker (homography H)
+      ↓
+Camera → RGB frame + H → PoseWorker → (gesture_loc, gesture_status, annotated_image)
+                                    ↓
+                              InteractionPolicy2D → zone_id → AudioWorker → ZoneAudioPlayer
+```
+
+### Core Components
+- **config.py**: ALL tunable parameters centralized here (50+ config classes)
+- **pose_detector.py**: 3 detectors (Base, Enhanced, Combined) with hand-size adaptive tap detection
+- **sift_detector.py**: SIFT/ORB-based template tracking with RANSAC homography
+- **workers.py**: Background threads with proper shutdown handling
+- **audio.py**: Pyglet-based audio (ambient loops + zone-specific playback)
+- **interaction_policy.py**: Normalized gesture → zone_id mapping with flicker filtering
+
+## Critical Development Patterns
+
+### 1. Hand Size Adaptive Thresholds
+ALL tap detection thresholds scale inversely with hand size (smaller hands = more sensitive):
+```python
+scale = max(MIN_SCALE_FACTOR, min(MAX_SCALE_FACTOR, REFERENCE_PALM_WIDTH / palm_width))
+threshold_scaled = base_threshold * scale  # Smaller hand → smaller threshold
+```
+When tuning detection in `TapDetectionConfig`, always consider reference size is 180px at close range.
+
+### 2. Configuration Changes
+**Never hardcode values in detector classes.** Always add to `config.py`:
+```python
+class TapDetectionConfig:
+    TAP_MIN_DURATION = 0.05  # Centralized, documented
+```
+Then import: `from config import TapDetectionConfig`
+
+### 3. Worker Communication Pattern
+```python
+# Enqueue (non-blocking, drop if full)
+worker.queue.put_nowait((frame, H))  
+
+# Read latest result (thread-safe)
+with worker.lock:
+    gesture_loc, status, img = worker.latest
+```
+Never use blocking `.put()` or `.get()` - would freeze main loop.
+
+### 4. Tap Detection Multi-Modal Fusion
+Three concurrent detection methods fused in `CombinedPoseDetector`:
+- **Z-depth**: Fingertip depth change vs baseline
+- **Angle-based**: DIP joint flexion angle
+- **Enhanced**: Palm plane penetration, relative depth, ray velocity
+
+A tap requires: `(base_detector OR enhanced_detector) AND tap_classifier AND rule_validation`
+
+### 5. Map Model JSON Structure
+```json
+{
+  "model": {
+    "modelType": "sift_2d_mediapipe",  // Must match for initialization
+    "filename": "models/UkraineMap/UkraineMap.png",  // Zone map (RGB=zone_id)
+    "template_image": "models/UkraineMap/template.png",  // SIFT reference
+    "hotspots": [
+      {"color": [255,0,0], "audioDescription": "path/to/audio.mp3"}
+    ]
+  }
+}
+```
+Color values are exact RGB matches (no tolerance). Template must show full map with clear corner features.
+
+## Common Development Tasks
+
+### Adding a New Tap Detection Feature
+1. Add config to `TapDetectionConfig` in `config.py`
+2. Add feature extraction in `_extract_classifier_features()` in `pose_detector.py`
+3. Update `TapClassifier.feature_names` in `tap_classifier/tap_classifier.py`
+4. Retrain: `python train_tap_classifier.py --train --samples 2000`
+5. Test manually: observe logs at DEBUG level for feature values
+
+### Debugging Tap Detection Issues
+```python
+# In config.py, enable debug logging
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+Watch for:
+- `scale_factor` values (should be 0.35-1.0)
+- `trigger_count` (2+ means multiple methods agree)
+- `Classifier trained on successful tap` (online learning working)
+
+### Testing New Models
+```bash
+python simple_camio.py --input1 models/TestDemo/demo_map.json
+```
+Press `h` to force map re-detection if tracking lost.
+Press `b` to toggle zone transition blips for testing audio zones.
+
+### Performance Optimization
+Check `CameraConfig.POSE_PROCESSING_SCALE` (default 0.35). Lower = faster but less accurate.
+Monitor `SIFTConfig.REDETECT_INTERVAL` (150 frames default). Higher = less CPU but slower recovery from tracking loss.
+
+## Project-Specific Conventions
+
+### Import Order
+```python
+import cv2 as cv  # Always "cv" not "cv2"
+import numpy as np
+import mediapipe as mp
+from config import *Config  # Import specific config classes
+from utils import ...  # Project utilities
+```
+
+### Naming Conventions
+- `H`: Always refers to 3x3 homography matrix (np.ndarray)
+- `gesture_loc`: Normalized (x, y) in [0,1] or None
+- `gesture_status`: String in {'pointing', 'tap', 'double_tap', None}
+- `zone_id`: Integer index into hotspots list
+
+### Coordinate Systems
+- **Camera space**: Pixels (0,0) = top-left
+- **Normalized space**: (0,0) = top-left, (1,1) = bottom-right (used for gesture_loc)
+- **MediaPipe landmarks**: (x,y,z) with z negative = toward camera
+
+### Thread Safety
+- **PoseWorker.latest**: Protected by `PoseWorker.lock`
+- **SIFTWorker.H**: Protected by `SIFTWorker.lock`
+- AudioWorker is internally thread-safe (queue-based)
+
+## Testing & Validation
+
+### Quick Smoke Test
+```powershell
+python -c "from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP; print('Import successful!')"
+python simple_camio.py  # Should auto-detect camera and load default UkraineMap
+```
+
+### Tap Classifier Training
+```powershell
+cd tap_classifier
+python train_tap_classifier.py --train --samples 1000
+python train_tap_classifier.py --evaluate
+python train_tap_classifier.py --feature-importance
+```
+
+### Running Tests
+No formal test suite yet. Manual testing via:
+1. Print map (models/UkraineMap/template.png)
+2. Run `python simple_camio.py`
+3. Point at map zones, verify audio playback
+4. Test tap gestures, check console for `Double tap detected!` logs
+
+## Integration Points
+
+### MediaPipe Hands API
+- 21 landmarks per hand (indices 0-20)
+- Index finger: TIP=8, DIP=7, PIP=6, MCP=5
+- Handedness: "Left" or "Right" (camera perspective)
+- See: https://google.github.io/mediapipe/solutions/hands
+
+### Pyglet Audio
+- Used for `.mp3` and `.wav` playback
+- `AmbientSoundPlayer`: Looping background (heartbeat, crickets)
+- `ZoneAudioPlayer`: One-shot zone descriptions
+- **Warning**: Pyglet 2.0+ has breaking changes; pinned to `<3.0.0`
+
+### OpenCV SIFT/ORB
+- `SIFT_N_FEATURES = 2000` (adjustable in `SIFTConfig`)
+- Falls back to ORB if SIFT unavailable (patent restrictions in some builds)
+- FLANN matcher with `RATIO_THRESH = 0.8` (Lowe's ratio test)
+
+## Gotchas & Known Issues
+
+1. **Camera buffering**: On Windows, `CAP_PROP_BUFFERSIZE` may not work. If latency issues occur, try different camera backend or reduce resolution.
+
+2. **SIFT detection failures**: Requires good lighting and clear corner features on template. If map not detected, press `h` to retry or adjust `SIFT_CONTRAST_THRESHOLD` in `SIFTConfig`.
+
+3. **Tap classifier not loading**: Ensure `models/tap_model.json` exists. Will fallback to rule-based detection with warning.
+
+4. **Double-tap cooldown**: `DOUBLE_TAP_COOLDOWN_MAIN = 0.7s` prevents rapid re-triggering. If taps feel unresponsive, reduce in `TapDetectionConfig`.
+
+5. **Legacy compatibility**: `simple_camio_2d.py` and `simple_camio_mp.py` are compatibility shims. Always edit the new modular files (workers.py, pose_detector.py, etc.), not the legacy files.
+
+## When to Read These Files
+
+- **Tuning detection**: `config.py` (all thresholds), `pose_detector.py` (detector logic)
+- **Audio issues**: `audio.py`, `workers.py` (AudioWorker)
+- **Tracking problems**: `sift_detector.py`, `SIFTConfig` in config.py
+- **Adding features**: `ARCHITECTURE.md` (data flow), then relevant detector/worker
+- **Performance**: `CameraConfig`, worker queue sizes in `WorkerConfig`
+
+## Dependency Versions (Critical)
+
+From `requirements.txt`:
+- **mediapipe**: 0.10.x (0.11+ breaks API)
+- **numpy**: <1.27 (compatibility with mediapipe)
+- **opencv-contrib-python**: 4.5.5+ (SIFT support)
+- **pyglet**: <3.0.0 (2.0+ has breaking audio changes)
+
+When updating dependencies, test tap detection immediately - MediaPipe landmark precision varies across versions.
+
+## Quick Command Reference
+
+```powershell
+# Run with default map
+python simple_camio.py
+
+# Run with custom map
+python simple_camio.py --input1 models/RivneMap/RivneMap.json
+
+# Train classifier
+python tap_classifier/train_tap_classifier.py --train --samples 1000
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+**In-app controls**: `q`/`ESC`=quit, `h`=redetect map, `b`=toggle blips
+
+---
+
+**Key principle**: When editing detection logic, always test with physical map and camera. Synthetic testing misses real-world hand jitter, lighting variations, and user interaction patterns.
