@@ -63,6 +63,7 @@ import time
 import logging
 from google.protobuf.json_format import MessageToDict
 from config import MediaPipeConfig, TapDetectionConfig
+from tap_classifier import TapClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -1086,6 +1087,14 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         # Load enhanced configuration parameters into instance
         self._load_enhanced_config()
         # Reuse hand size cache from base class
+
+        # Initialize tap classifier
+        try:
+            self.tap_classifier = TapClassifier(model_path='models/tap_model.json')
+            logger.info("TapClassifier initialized successfully")
+        except Exception as e:
+            logger.warning(f"Could not initialize TapClassifier: {e}. Using fallback.")
+            self.tap_classifier = None
         # self._hand_size_cache is inherited
 
     def _load_enhanced_config(self):
@@ -1835,12 +1844,110 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                      (st['peak_ang_depth'] >= thresholds['ang_min_press_depth']))
         
         # Classifier-based validation
-        feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
-                         drift, abs(velocities['vzrel']), abs(velocities['vplane']), duration], dtype=float)
-        prob = self._tiny_cls_prob(feats)
-        
-        return valid_rule and (prob >= self.CLS_MIN_PROB)
-    
+        if self.tap_classifier is not None:
+            try:
+                # Extract features for classifier
+                features = self._extract_classifier_features(
+                    st, velocities, thresholds, duration, drift
+                )
+
+                # Store features for later training (if tap is confirmed)
+                st['_last_features'] = features
+
+                # Get classifier prediction
+                prob = self.tap_classifier.predict(features)
+                valid_classifier = (prob >= self.CLS_MIN_PROB)
+
+                # Log classifier decision for debugging
+                logger.debug(f"Tap classifier: prob={prob:.3f}, threshold={self.CLS_MIN_PROB:.3f}, "
+                           f"rule_valid={valid_rule}, cls_valid={valid_classifier}")
+
+                # Use both rule-based and classifier validation
+                return valid_rule and valid_classifier
+
+            except Exception as e:
+                logger.warning(f"Classifier prediction failed: {e}, falling back to rules")
+                # Fallback to original tiny classifier
+                feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
+                                 drift, abs(velocities['vzrel']), abs(velocities['vplane']), duration], dtype=float)
+                prob = self._tiny_cls_prob(feats)
+                return valid_rule and (prob >= self.CLS_MIN_PROB)
+        else:
+            # Fallback to original tiny classifier if main classifier not available
+            feats = np.array([st['peak_zrel_depth'], st['peak_plane_depth'], st['peak_ang_depth'],
+                             drift, abs(velocities['vzrel']), abs(velocities['vplane']), duration], dtype=float)
+            prob = self._tiny_cls_prob(feats)
+            return valid_rule and (prob >= self.CLS_MIN_PROB)
+
+    def _extract_classifier_features(self, st, velocities, thresholds, duration, drift):
+        """
+        Extract features for the tap classifier.
+
+        Args:
+            st (dict): Enhanced state
+            velocities (dict): Velocity components
+            thresholds (dict): Scaled thresholds
+            duration (float): Press duration
+            drift (float): XY drift
+
+        Returns:
+            numpy.ndarray: Feature vector for classifier
+        """
+        # Create features array matching TapClassifier.extract_features
+        features = np.zeros(18, dtype=float)  # 18 features as defined in classifier
+
+        # Depth features
+        features[0] = st.get('peak_zrel_depth', 0.0)        # zrel_depth
+        features[1] = st.get('peak_plane_depth', 0.0)       # plane_depth
+        features[2] = st.get('peak_ang_depth', 0.0)         # ang_depth
+        features[3] = 0.0  # z_depth (from base detector, not available here)
+
+        # Spatial features
+        features[4] = drift                                  # drift
+
+        # Velocity features
+        features[5] = abs(velocities.get('vzrel', 0.0))     # vzrel
+        features[6] = abs(velocities.get('vplane', 0.0))    # vplane
+        features[7] = velocities.get('vang', 0.0)           # vang
+        features[8] = 0.0  # vz (from base detector)
+        features[9] = velocities.get('ray_in_v', 0.0)       # ray_vel
+
+        # Temporal features
+        features[10] = duration                              # duration
+
+        # Scaling features
+        features[11] = thresholds.get('scale_factor', 1.0)   # scale_factor
+        features[12] = thresholds.get('palm_width', 180.0)   # palm_width
+
+        # Trigger count (not available in current context, use heuristic)
+        trigger_count = sum([
+            features[0] > 0.005,  # zrel depth significant
+            features[1] > 0.005,  # plane depth significant
+            features[2] > 5.0,    # angle depth significant
+            features[5] > 0.1     # velocity significant
+        ])
+        features[13] = trigger_count                         # trigger_count
+
+        # Engineered features (computed by classifier internally, but we can pre-compute)
+        # depth_ratio
+        features[14] = features[0] / (features[1] + 1e-6) if features[1] > 1e-6 else 0.0
+
+        # vel_consistency (simple heuristic based on available velocities)
+        vel_indicators = [-features[5], -features[6], features[7], features[9]]
+        features[15] = sum(1 for v in vel_indicators if v > 0.05) / len(vel_indicators)
+
+        # spatial_stability
+        max_expected_drift = 150.0
+        features[16] = 1.0 / (1.0 + np.exp((drift - max_expected_drift/2) / 30.0))
+
+        # temporal_fitness
+        cfg = TapDetectionConfig
+        optimal_dur = (cfg.TAP_MIN_DURATION + cfg.TAP_MAX_DURATION) / 2
+        sigma = (cfg.TAP_MAX_DURATION - cfg.TAP_MIN_DURATION) / 4
+        features[17] = np.exp(-0.5 * ((duration - optimal_dur) / sigma) ** 2)
+
+        return features
+
     def _check_enhanced_double_tap(self, st, now, pos_x, pos_y, draw, img_out):
         """
         Check for enhanced double tap.
@@ -1865,6 +1972,15 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 cv.putText(img_out, "DOUBLE TAP", (int(pos_x), int(pos_y) - 10),
                           cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
+            # Train classifier on successful double tap (positive example)
+            if self.tap_classifier is not None and hasattr(st, '_last_features'):
+                try:
+                    # Train on the features that led to this successful tap
+                    self.tap_classifier.train(st['_last_features'], is_tap=True)
+                    logger.debug("Classifier trained on successful tap")
+                except Exception as e:
+                    logger.warning(f"Failed to train classifier: {e}")
+
             st['last_tap'] = 0.0
             st['cooldown_until'] = now + self.TAP_COOLDOWN
             st['pressing'] = False
