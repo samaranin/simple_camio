@@ -60,11 +60,10 @@ Tap data saved to data/tap_dataset/tap_data_20251027_143022.json
 
 ### 4. Train on Your Data
 
-Navigate to the tap_classifier directory:
+Train on your collected data from the project root:
 
 ```powershell
-cd tap_classifier
-python train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset
+python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir data/tap_dataset
 ```
 
 This will:
@@ -84,13 +83,13 @@ The next time you run Simple CamIO, it will automatically use your trained model
 If you've collected data across multiple sessions:
 
 ```powershell
-python train_tap_classifier.py --merge-datasets --data-dir ../data/tap_dataset --output merged_data.json
+python tap_classifier/train_tap_classifier.py --merge-datasets --data-dir data/tap_dataset --output merged_data.json
 ```
 
 Then train on the merged dataset:
 
 ```powershell
-python train_tap_classifier.py --train-from-collected --data-dir . --epochs 15
+python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir data/tap_dataset --epochs 15
 ```
 
 ### Evaluate Model Performance
@@ -98,7 +97,7 @@ python train_tap_classifier.py --train-from-collected --data-dir . --epochs 15
 Check how well your trained model performs:
 
 ```powershell
-python train_tap_classifier.py --evaluate --model-path models/tap_model.json
+python tap_classifier/train_tap_classifier.py --evaluate --model-path models/tap_model.json
 ```
 
 ### View Feature Importance
@@ -106,7 +105,7 @@ python train_tap_classifier.py --evaluate --model-path models/tap_model.json
 See which features are most important for tap detection:
 
 ```powershell
-python train_tap_classifier.py --feature-importance
+python tap_classifier/train_tap_classifier.py --feature-importance
 ```
 
 ### Combine Synthetic and Real Data
@@ -115,10 +114,10 @@ For best results, you can train on both synthetic and collected data:
 
 ```powershell
 # First train on synthetic data
-python train_tap_classifier.py --train --samples 2000 --epochs 10
+python tap_classifier/train_tap_classifier.py --train --samples 2000 --epochs 10
 
 # Then fine-tune on your collected data
-python train_tap_classifier.py --train-from-collected --learning-rate 0.005 --epochs 5
+python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.005 --epochs 5
 ```
 
 ## Data Collection Details
@@ -213,13 +212,13 @@ This helps you track balance between positive and negative examples.
 
 ```powershell
 # Conservative training (stable, safe)
-python train_tap_classifier.py --train-from-collected --learning-rate 0.005 --epochs 20
+python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.005 --epochs 20
 
 # Aggressive training (fast, may overfit)
-python train_tap_classifier.py --train-from-collected --learning-rate 0.02 --epochs 5
+python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.02 --epochs 5
 
 # Balanced (recommended)
-python train_tap_classifier.py --train-from-collected --learning-rate 0.01 --epochs 10
+python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.01 --epochs 10
 ```
 
 ## Troubleshooting

@@ -86,32 +86,32 @@ Extends `TapClassifier` with:
 
 ### Training a New Model
 
-```bash
+```powershell
 # Train with default parameters (1000 samples, 10 epochs)
-python train_tap_classifier.py --train
+python tap_classifier/train_tap_classifier.py --train
 
 # Train with custom parameters
-python train_tap_classifier.py --train --samples 2000 --learning-rate 0.02 --epochs 15
+python tap_classifier/train_tap_classifier.py --train --samples 2000 --learning-rate 0.02 --epochs 15
 
 # Save to custom location
-python train_tap_classifier.py --train --model-path models/my_model.json
+python tap_classifier/train_tap_classifier.py --train --model-path models/my_model.json
 ```
 
 ### Evaluating a Model
 
-```bash
+```powershell
 # Evaluate on test data
-python train_tap_classifier.py --evaluate
+python tap_classifier/train_tap_classifier.py --evaluate
 
 # Evaluate with more test samples
-python train_tap_classifier.py --evaluate --test-samples 1000
+python tap_classifier/train_tap_classifier.py --evaluate --test-samples 1000
 ```
 
 ### Feature Importance Analysis
 
-```bash
+```powershell
 # Show which features matter most
-python train_tap_classifier.py --feature-importance
+python tap_classifier/train_tap_classifier.py --feature-importance
 ```
 
 ### Integration in Pose Detector
@@ -240,42 +240,37 @@ class TapDetectionConfig:
 
 ## Files
 
-- `tap_classifier.py` - Main classifier implementation
-- `train_tap_classifier.py` - Training and evaluation utilities
+- `tap_classifier/tap_classifier.py` - Main classifier implementation
+- `tap_classifier/train_tap_classifier.py` - Training and evaluation utilities
+- `tap_classifier/tap_data_collector.py` - Automatic data collection from usage
 - `models/tap_model.json` - Pre-trained model weights
-- `TAP_CLASSIFIER_README.md` - This documentation
+- `tap_classifier/TAP_CLASSIFIER_README.md` - This documentation
+- `tap_classifier/DATA_COLLECTION_GUIDE.md` - Guide for collecting real-world data
 
-## Advanced: Collecting Real Training Data
+## Collecting Real Training Data
 
-To improve the classifier with real-world data:
+Simple CamIO now has built-in automatic data collection! See [DATA_COLLECTION_GUIDE.md](DATA_COLLECTION_GUIDE.md) for full details.
 
-```python
-# In your application, log tap attempts
-def log_tap_data(features, was_successful):
-    """Log tap data for later training."""
-    with open('tap_data.jsonl', 'a') as f:
-        data = {
-            'features': features.tolist(),
-            'label': was_successful,
-            'timestamp': time.time()
-        }
-        f.write(json.dumps(data) + '\n')
+**Quick start:**
 
-# Later, train on collected data
-def train_on_real_data():
-    features_list = []
-    labels_list = []
-    
-    with open('tap_data.jsonl', 'r') as f:
-        for line in f:
-            data = json.loads(line)
-            features_list.append(data['features'])
-            labels_list.append(data['label'])
-    
-    classifier = TapClassifier()
-    classifier.batch_train(features_list, labels_list, epochs=5)
-    classifier.save_model('models/real_world_model.json')
-```
+1. Enable in `config.py`:
+   ```python
+   class TapDetectionConfig:
+       COLLECT_TAP_DATA = True
+       TAP_DATA_DIR = 'data/tap_dataset'
+   ```
+
+2. Run normally and perform taps:
+   ```powershell
+   python simple_camio.py
+   ```
+
+3. Train on collected data:
+   ```powershell
+   python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir data/tap_dataset
+   ```
+
+The system automatically collects both positive (confirmed taps) and negative (rejected gestures) examples with all 18 features, timestamps, and metadata.
 
 ## Troubleshooting
 
@@ -285,17 +280,18 @@ def train_on_real_data():
 - Adjust learning rate: `--learning-rate 0.005`
 
 ### Too Sensitive (False Positives)
-- Increase threshold: `CLS_MIN_PROB = 0.75`
+- Increase threshold: `CLS_MIN_PROB = 0.75` in `config.py`
 - Train with more negative examples
 
 ### Missing Taps (False Negatives)
-- Decrease threshold: `CLS_MIN_PROB = 0.55`
+- Decrease threshold: `CLS_MIN_PROB = 0.55` in `config.py`
 - Train with more diverse positive examples
+- Collect real-world data to personalize model
 
 ### Model Not Loading
 - Check file path: `models/tap_model.json` exists
 - Verify JSON format is valid
-- Re-train if corrupted: `python train_tap_classifier.py --train`
+- Re-train if corrupted: `python tap_classifier/train_tap_classifier.py --train`
 
 ## Future Enhancements
 

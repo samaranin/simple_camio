@@ -109,11 +109,11 @@ Color values are exact RGB matches (no tolerance). Template must show full map w
 
 ### Collecting Real-World Tap Data
 1. Enable in `config.py`: `TapDetectionConfig.COLLECT_TAP_DATA = True`
-2. Run normally: `python simple_camio.py`
+2. Run normally: `python simple_camio.py --input1 models/UkraineMap/UkraineMap.json`
 3. Data auto-saves to `data/tap_dataset/tap_data_YYYYMMDD_HHMMSS.json`
 4. Train on your data: `python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset`
 5. Merge sessions (optional): `python tap_classifier/train_tap_classifier.py --merge-datasets --data-dir ../data/tap_dataset --output merged.json`
-6. Model personalizes to your tap style over time
+6. Model adapts to different tap styles over time
 
 ### Debugging Tap Detection Issues
 ```python
