@@ -16,14 +16,16 @@ import logging
 import numpy as np  # moved to top to avoid per-call imports
 
 # Import from new modular structure
-from config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetectionConfig
-from utils import select_camera_port, load_map_parameters, draw_rectangle_on_image, draw_rectangle_from_points, is_gesture_valid
-from audio import AmbientSoundPlayer, ZoneAudioPlayer
-from gesture_detection import GestureDetector, MovementMedianFilter
-from pose_detector import CombinedPoseDetector
-from sift_detector import SIFTModelDetectorMP
-from interaction_policy import InteractionPolicy2D
-from workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
+from src.config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetectionConfig
+from src.core.utils import select_camera_port, load_map_parameters, is_gesture_valid
+from src.audio.audio import AmbientSoundPlayer, ZoneAudioPlayer
+from src.detection.gesture_detection import GestureDetector, MovementMedianFilter
+from src.detection.pose_detector import CombinedPoseDetector
+from src.detection.sift_detector import SIFTModelDetectorMP
+from src.core.interaction_policy import InteractionPolicy2D
+from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
+from src.core.display_thread import DisplayThread
+from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
 
 # Configure logging
 logging.basicConfig(
@@ -86,44 +88,6 @@ def initialize_system(model_path):
         'crickets_player': crickets_player,
         'heartbeat_player': heartbeat_player
     }
-
-
-def setup_camera(cam_port):
-    """
-    Initialize and configure the camera.
-
-    Args:
-        cam_port (int): Camera port number
-
-    Returns:
-        cv.VideoCapture: Configured camera capture object
-    """
-    logger.info(f"Setting up camera on port {cam_port}")
-
-    cap = cv.VideoCapture(cam_port, cv.CAP_DSHOW)
-    cap.set(cv.CAP_PROP_FRAME_HEIGHT, CameraConfig.DEFAULT_HEIGHT)
-    cap.set(cv.CAP_PROP_FRAME_WIDTH, CameraConfig.DEFAULT_WIDTH)
-    cap.set(cv.CAP_PROP_FOCUS, CameraConfig.FOCUS)
-
-    # Reduce latency
-    try:
-        cap.set(cv.CAP_PROP_BUFFERSIZE, CameraConfig.BUFFER_SIZE)
-    except Exception as e:
-        logger.warning(f"Could not set camera buffer size: {e}")
-
-    # Enable OpenCV optimizations and set a reasonable thread count
-    try:
-        cv.setUseOptimized(True)
-    except Exception:
-        pass
-    try:
-        # Use about half the CPUs to reduce contention with Python threads
-        num_threads = max(1, int(getattr(cv, "getNumberOfCPUs", lambda: 4)() // 2))
-        cv.setNumThreads(num_threads)
-    except Exception:
-        pass
-
-    return cap
 
 
 def create_worker_threads(components, stop_event):
@@ -284,77 +248,6 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
     return last_double_tap_ts
 
 
-def draw_map_tracking(display_img, model_detector, interact, rect_flash_remaining):
-    """
-    Draw the map tracking rectangle on the display image.
-
-    Args:
-        display_img: Image to draw on
-        model_detector: SIFT detector with tracking info
-        interact: Interaction policy with map shape
-        rect_flash_remaining (int): Frames remaining for flash effect
-
-    Returns:
-        tuple: (updated_image, updated_flash_remaining)
-    """
-    if getattr(model_detector, 'last_rect_pts', None) is not None:
-        if rect_flash_remaining > 0:
-            display_img = draw_rectangle_from_points(
-                display_img, model_detector.last_rect_pts,
-                color=UIConfig.COLOR_YELLOW, thickness=5
-            )
-            rect_flash_remaining -= 1
-        else:
-            display_img = draw_rectangle_from_points(
-                display_img, model_detector.last_rect_pts,
-                color=UIConfig.COLOR_GREEN, thickness=3
-            )
-    else:
-        display_img = draw_rectangle_on_image(
-            display_img, interact.image_map_color.shape, model_detector.H
-        )
-
-    return display_img, rect_flash_remaining
-
-
-def draw_ui_overlay(display_img, model_detector, gesture_status, timer):
-    """
-    Draw status information overlay on the display image.
-
-    Args:
-        display_img: Image to draw on
-        model_detector: SIFT detector for status
-        gesture_status: Current gesture status
-        timer (float): Previous frame timestamp for FPS calculation
-
-    Returns:
-        float: Current timestamp (new timer value)
-    """
-    # Tracking status
-    status_text = model_detector.get_tracking_status()
-    cv.putText(display_img, status_text, (10, 30),
-              cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
-              UIConfig.COLOR_GREEN, UIConfig.FONT_THICKNESS)
-
-    # Gesture status
-    if gesture_status:
-        cv.putText(display_img, f"Gesture: {gesture_status}", (10, 90),
-                  cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
-                  UIConfig.COLOR_YELLOW, UIConfig.FONT_THICKNESS)
-
-    # FPS counter
-    prev_time = timer
-    current_time = time.time()
-    elapsed_time = current_time - prev_time
-    if elapsed_time > 0:
-        fps_text = f"FPS: {1/elapsed_time:.1f}"
-        cv.putText(display_img, fps_text, (10, 60),
-                  cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
-                  UIConfig.COLOR_GREEN, UIConfig.FONT_THICKNESS)
-
-    return current_time
-
-
 def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
     """
     Handle keyboard input for user controls.
@@ -404,6 +297,202 @@ def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
     return True
 
 
+def initialize_display(use_threaded):
+    """
+    Initialize display system (threaded or traditional).
+    
+    Args:
+        use_threaded (bool): Whether to use threaded display
+        
+    Returns:
+        DisplayThread or None: Display thread if enabled, None otherwise
+    """
+    if use_threaded:
+        display_thread = DisplayThread(window_name='image reprojection')
+        display_thread.start()
+        logger.info("DisplayThread enabled for non-blocking rendering")
+        return display_thread
+    else:
+        # Create window for non-threaded display
+        cv.namedWindow('image reprojection', cv.WINDOW_NORMAL)
+        return None
+
+
+def capture_and_preprocess(cap, prof_times):
+    """
+    Capture frame from camera and convert to grayscale.
+    
+    Args:
+        cap: Camera capture object
+        prof_times (dict): Performance timing dictionary
+        
+    Returns:
+        tuple: (success, frame, gray) or (False, None, None) on error
+    """
+    frame_start = time.time()
+    ret, frame = cap.read()
+    prof_times['capture'] += time.time() - frame_start
+    
+    if not ret:
+        logger.error("No camera image returned")
+        return False, None, None
+    
+    # Convert to grayscale for SIFT
+    t = time.time()
+    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    prof_times['gray'] += time.time() - t
+    
+    return True, frame, gray
+
+
+def get_pose_results(workers, prof_times):
+    """
+    Get latest pose detection results from worker thread.
+    
+    Args:
+        workers (dict): Worker threads and queues
+        prof_times (dict): Performance timing dictionary
+        
+    Returns:
+        tuple: (gesture_loc, gesture_status, annotated_frame)
+    """
+    t = time.time()
+    with workers['lock']:
+        gesture_loc, gesture_status, annotated = workers['pose_worker'].latest
+    prof_times['lock'] += time.time() - t
+    return gesture_loc, gesture_status, annotated
+
+
+def process_map_detection(components, workers, display_img, rect_flash_remaining, 
+                          gesture_loc, gesture_status, last_double_tap_ts, prof_times):
+    """
+    Process map detection status and handle gestures/audio.
+    
+    Args:
+        components (dict): System components
+        workers (dict): Worker threads
+        display_img: Current display image
+        rect_flash_remaining (int): Flash counter for rectangle
+        gesture_loc: Current gesture location
+        gesture_status: Current gesture status
+        last_double_tap_ts (float): Last double-tap timestamp
+        prof_times (dict): Performance timing dictionary
+        
+    Returns:
+        tuple: (updated_display_img, rect_flash_remaining, last_double_tap_ts)
+    """
+    t = time.time()
+    
+    if components['model_detector'].H is None:
+        # Map not detected - play ambient crickets
+        workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
+        workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
+    else:
+        # Map detected - increment age counter
+        try:
+            components['model_detector'].frames_since_last_detection += 1
+        except Exception:
+            components['model_detector'].frames_since_last_detection = 1
+
+        # Draw tracking rectangle
+        display_img, rect_flash_remaining = draw_map_tracking(
+            display_img, components['model_detector'],
+            components['interact'], rect_flash_remaining
+        )
+
+        # Process gestures and audio
+        last_double_tap_ts = process_gestures_and_audio(
+            gesture_loc, gesture_status, components, last_double_tap_ts,
+            workers['audio_worker']
+        )
+    
+    prof_times['draw'] += time.time() - t
+    return display_img, rect_flash_remaining, last_double_tap_ts
+
+
+def handle_display_and_input(display_img, display_frame_counter, display_thread, 
+                             stop_event, frame, workers, components, prof_times):
+    """
+    Handle frame display and keyboard input.
+    
+    Args:
+        display_img: Image to display
+        display_frame_counter (int): Frame skip counter
+        display_thread: DisplayThread or None
+        stop_event: Event for shutdown coordination
+        frame: Current camera frame
+        workers (dict): Worker threads
+        components (dict): System components
+        prof_times (dict): Performance timing dictionary
+        
+    Returns:
+        tuple: (should_continue, updated_counter)
+    """
+    # Check if should display this frame
+    display_frame_counter += 1
+    should_display = (display_frame_counter >= CameraConfig.DISPLAY_FRAME_SKIP)
+    if should_display:
+        display_frame_counter = 0
+    
+    # Display frame (threaded or direct)
+    t = time.time()
+    if CameraConfig.USE_THREADED_DISPLAY:
+        # Non-blocking display via thread
+        if should_display and display_thread:
+            display_thread.show(display_img)
+        # Get keyboard input from display thread
+        waitkey = display_thread.get_last_key() if display_thread else 255
+    else:
+        # Blocking display (traditional)
+        if should_display:
+            cv.imshow('image reprojection', display_img)
+            waitkey = cv.waitKey(1) & 0xFF
+        else:
+            waitkey = cv.waitKey(1) & 0xFF
+    prof_times['show'] += time.time() - t
+    
+    # Handle keyboard input
+    t = time.time()
+    should_continue = True
+    if waitkey != 255:  # 255 means no key pressed
+        if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+            should_continue = False
+    prof_times['key'] += time.time() - t
+    
+    return should_continue, display_frame_counter
+
+
+def update_performance_stats(frame_count, prof_start, prof_times, PROF_INTERVAL):
+    """
+    Update and log performance statistics.
+    
+    Args:
+        frame_count (int): Number of frames processed
+        prof_start (float): Start time of profiling period
+        prof_times (dict): Performance timing dictionary
+        PROF_INTERVAL (float): Profiling interval in seconds
+        
+    Returns:
+        tuple: (updated_frame_count, updated_prof_start, updated_prof_times)
+    """
+    frame_count += 1
+    elapsed = time.time() - prof_start
+    
+    if elapsed >= PROF_INTERVAL:
+        fps = frame_count / elapsed
+        logger.info(f"=== Performance (last {frame_count} frames, {elapsed:.1f}s, {fps:.1f} FPS) ===")
+        for key, val in prof_times.items():
+            pct = 100 * val / elapsed
+            logger.info(f"  {key:10s}: {val*1000:.1f}ms ({pct:.1f}%)")
+        
+        # Reset counters
+        frame_count = 0
+        prof_start = time.time()
+        prof_times = {k: 0 for k in prof_times}
+    
+    return frame_count, prof_start, prof_times
+
+
 def run_main_loop(cap, components, workers, stop_event):
     """
     Main processing loop for the CamIO system.
@@ -414,29 +503,37 @@ def run_main_loop(cap, components, workers, stop_event):
         workers (dict): Worker threads and queues
         stop_event: Event for shutdown coordination
     """
+    # Initialize state variables
     last_double_tap_ts = 0.0
     rect_flash_remaining = 0
     timer = time.time() - 1
 
     logger.info("Starting main loop")
 
+    # Performance profiling variables
+    frame_count = 0
+    prof_start = time.time()
+    prof_times = {'capture': 0, 'gray': 0, 'feed': 0, 'lock': 0, 'draw': 0, 'ui': 0, 'show': 0, 'key': 0, 'pyglet': 0}
+    PROF_INTERVAL = 10.0  # Log performance every 10 seconds
+    display_frame_counter = 0  # Counter for frame skip
+    
+    # Initialize display system
+    display_thread = initialize_display(CameraConfig.USE_THREADED_DISPLAY)
+
+    # Main processing loop
     while cap.isOpened() and not stop_event.is_set():
-        # Capture frame
-        ret, frame = cap.read()
-        if not ret:
-            logger.error("No camera image returned")
+        # Capture and preprocess frame
+        success, frame, gray = capture_and_preprocess(cap, prof_times)
+        if not success:
             break
 
-        # Convert to grayscale for SIFT
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-
         # Feed worker queues
+        t = time.time()
         feed_worker_queues(frame, gray, workers, components['model_detector'])
+        prof_times['feed'] += time.time() - t
 
         # Get latest pose detection results
-        with workers['lock']:
-            gesture_loc, gesture_status, annotated = workers['pose_worker'].latest
-
+        gesture_loc, gesture_status, annotated = get_pose_results(workers, prof_times)
         display_img = frame if annotated is None else annotated
 
         # Check for homography update (triggers flash)
@@ -444,45 +541,40 @@ def run_main_loop(cap, components, workers, stop_event):
             rect_flash_remaining = UIConfig.RECT_FLASH_FRAMES
             components['model_detector'].homography_updated = False
 
-        # Process based on map detection status
-        if components['model_detector'].H is None:
-            # Map not detected - play ambient crickets
-            workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
-            workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
-        else:
-            # Map detected - increment age counter
-            try:
-                components['model_detector'].frames_since_last_detection += 1
-            except Exception:
-                components['model_detector'].frames_since_last_detection = 1
-
-            # Draw tracking rectangle
-            display_img, rect_flash_remaining = draw_map_tracking(
-                display_img, components['model_detector'],
-                components['interact'], rect_flash_remaining
-            )
-
-            # Process gestures and audio
-            last_double_tap_ts = process_gestures_and_audio(
-                gesture_loc, gesture_status, components, last_double_tap_ts,
-                workers['audio_worker']
-            )
+        # Process map detection and gestures
+        display_img, rect_flash_remaining, last_double_tap_ts = process_map_detection(
+            components, workers, display_img, rect_flash_remaining,
+            gesture_loc, gesture_status, last_double_tap_ts, prof_times
+        )
 
         # Draw UI overlay
+        t = time.time()
         timer = draw_ui_overlay(display_img, components['model_detector'],
                                gesture_status, timer)
+        prof_times['ui'] += time.time() - t
 
-        # Display the frame
-        cv.imshow('image reprojection', display_img)
-
-        # Handle keyboard input
-        waitkey = cv.waitKey(1)
-        if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+        # Handle display and keyboard input
+        should_continue, display_frame_counter = handle_display_and_input(
+            display_img, display_frame_counter, display_thread,
+            stop_event, frame, workers, components, prof_times
+        )
+        if not should_continue:
             break
 
         # Update Pyglet event loop
+        t = time.time()
         pyglet.clock.tick()
         pyglet.app.platform_event_loop.dispatch_posted_events()
+        prof_times['pyglet'] += time.time() - t
+
+        # Update performance statistics
+        frame_count, prof_start, prof_times = update_performance_stats(
+            frame_count, prof_start, prof_times, PROF_INTERVAL
+        )
+    
+    # Cleanup display thread
+    if display_thread:
+        display_thread.stop()
 
 
 def cleanup(cap, components, workers):

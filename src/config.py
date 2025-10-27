@@ -3,13 +3,19 @@ Configuration module for Simple CamIO.
 
 This module contains all configuration parameters and constants used throughout the application.
 Centralizing configuration makes it easier to tune parameters and understand system behavior.
+
+PERFORMANCE TUNING:
+- For best FPS: Set DEFAULT_WIDTH=640, DEFAULT_HEIGHT=480, USE_THREADED_CAPTURE=True
+- For quality: Set DEFAULT_WIDTH=1920, DEFAULT_HEIGHT=1080, but expect lower FPS
+- If camera is slow: Enable USE_THREADED_CAPTURE and try BACKEND=cv.CAP_MSMF
 """
 
 # ==================== Camera Configuration ====================
 class CameraConfig:
     """Camera capture configuration parameters."""
 
-    # Default camera resolution
+    # Default camera resolution (lower = faster)
+    # Try 640x480 for best FPS, 1280x720 for balance, 1920x1080 for quality
     DEFAULT_WIDTH = 1920
     DEFAULT_HEIGHT = 1080
 
@@ -21,6 +27,29 @@ class CameraConfig:
 
     # Processing scale for pose detection (smaller = faster but less accurate)
     POSE_PROCESSING_SCALE = 0.35
+    
+    # Target FPS for camera (actual may vary by camera capability)
+    TARGET_FPS = 30
+    
+    # Use threaded camera capture (can improve FPS significantly)
+    USE_THREADED_CAPTURE = True
+    
+    # Use threaded display (non-blocking cv.imshow for smoother rendering)
+    # Highly recommended for high FPS systems
+    USE_THREADED_DISPLAY = True
+    
+    # Display frame skip - show every Nth frame to improve smoothness
+    # Higher = smoother but lower display FPS (processing still happens on all frames)
+    # 1 = show all frames, 2 = show every other frame, etc.
+    # Recommended: 3-5 for high FPS cameras to avoid cv.imshow() blocking
+    # NOTE: Less important when USE_THREADED_DISPLAY=True
+    DISPLAY_FRAME_SKIP = 4
+    
+    # Camera backend to use (None for default, or cv.CAP_DSHOW, cv.CAP_MSMF, cv.CAP_ANY)
+    # DSHOW: DirectShow (good compatibility, may be slower)
+    # MSMF: Media Foundation (faster, Windows 10+)
+    # None: Let OpenCV choose
+    BACKEND = None  # Change to cv.CAP_MSMF for potentially better performance
 
 
 # ==================== Movement Filter Configuration ====================

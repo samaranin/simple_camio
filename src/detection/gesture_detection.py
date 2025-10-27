@@ -9,7 +9,7 @@ import time
 import numpy as np
 from collections import deque
 import logging
-from config import MovementFilterConfig, GestureDetectorConfig
+from src.config import MovementFilterConfig, GestureDetectorConfig
 
 logger = logging.getLogger(__name__)
 

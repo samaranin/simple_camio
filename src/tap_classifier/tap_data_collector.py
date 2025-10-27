@@ -14,7 +14,7 @@ FEATURES:
 
 USAGE:
     from tap_data_collector import TapDataCollector
-    from config import TapDetectionConfig
+    from src.config import TapDetectionConfig
     
     # Initialize collector
     collector = TapDataCollector(
@@ -39,7 +39,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from collections import deque
-from config import TapDetectionConfig
+from src.config import TapDetectionConfig
 
 logger = logging.getLogger(__name__)
 

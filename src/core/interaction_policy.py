@@ -8,8 +8,8 @@ the user is interacting with based on their finger position.
 import cv2 as cv
 import numpy as np
 import logging
-from config import InteractionConfig
-from utils import color_to_index
+from src.config import InteractionConfig
+from src.core.utils import color_to_index
 
 logger = logging.getLogger(__name__)
 

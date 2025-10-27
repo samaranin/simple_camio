@@ -45,7 +45,7 @@ import json
 import logging
 from pathlib import Path
 from collections import deque
-from config import TapDetectionConfig
+from src.config import TapDetectionConfig
 
 logger = logging.getLogger(__name__)
 

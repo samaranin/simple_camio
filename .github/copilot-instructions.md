@@ -4,12 +4,12 @@
 
 Simple CamIO is a **computer vision-based assistive technology** that enables vision-impaired users to explore tactile maps through hand gestures. It combines MediaPipe hand tracking, SIFT-based map detection, multi-modal tap recognition, and spatial audio feedback to create an interactive map exploration experience.
 
-**Branch**: `double_tap_detection_helper` - Active development of enhanced tap detection using ML classifier.
-
 ## Architecture Quick Reference
 
 ### Threading Model (Critical)
-- **Main thread**: Camera capture, UI rendering, keyboard input (`simple_camio.py`)
+- **Main thread**: Frame coordination, gesture processing, event dispatch (`simple_camio.py`)
+- **ThreadedCamera** (optional): Non-blocking camera capture in background thread
+- **DisplayThread** (optional): Non-blocking cv.imshow() in background thread
 - **PoseWorker**: Downscaled (0.35x) hand pose detection with tap analysis
 - **SIFTWorker**: Full-resolution map tracking and homography validation
 - **AudioWorker**: Non-blocking audio playback via command queue
@@ -18,20 +18,25 @@ Simple CamIO is a **computer vision-based assistive technology** that enables vi
 
 ### Data Flow
 ```
-Camera → Gray frame → SIFTWorker (homography H)
-      ↓
-Camera → RGB frame + H → PoseWorker → (gesture_loc, gesture_status, annotated_image)
-                                    ↓
-                              InteractionPolicy2D → zone_id → AudioWorker → ZoneAudioPlayer
+ThreadedCamera (optional) → Gray frame → SIFTWorker (homography H)
+                         ↓
+                RGB frame + H → PoseWorker → (gesture_loc, gesture_status, annotated_image)
+                                           ↓
+                                     InteractionPolicy2D → zone_id → AudioWorker → ZoneAudioPlayer
+                                           ↓
+                                DisplayThread (optional) → cv.imshow()
 ```
 
 ### Core Components
-- **config.py**: ALL tunable parameters centralized here (50+ config classes)
-- **pose_detector.py**: 3 detectors (Base, Enhanced, Combined) with hand-size adaptive tap detection
-- **sift_detector.py**: SIFT/ORB-based template tracking with RANSAC homography
-- **workers.py**: Background threads with proper shutdown handling
-- **audio.py**: Pyglet-based audio (ambient loops + zone-specific playback)
-- **interaction_policy.py**: Normalized gesture → zone_id mapping with flicker filtering
+- **src/config.py**: ALL tunable parameters centralized at src root (50+ config classes)
+- **src/core/camera_thread.py**: Background camera capture (ThreadedCamera)
+- **src/core/display_thread.py**: Background display rendering (DisplayThread)
+- **src/core/workers.py**: Background processing threads (Pose, SIFT, Audio)
+- **src/detection/pose_detector.py**: 3 detectors (Base, Enhanced, Combined) with hand-size adaptive tap detection
+- **src/detection/sift_detector.py**: SIFT/ORB-based template tracking with RANSAC homography
+- **src/audio/audio.py**: Pyglet-based audio (ambient loops + zone-specific playback)
+- **src/core/interaction_policy.py**: Normalized gesture → zone_id mapping with flicker filtering
+- **src/ui/display.py**: Drawing functions and UI overlays
 
 ## Critical Development Patterns
 
@@ -44,14 +49,20 @@ threshold_scaled = base_threshold * scale  # Smaller hand → smaller threshold
 When tuning detection in `TapDetectionConfig`, always consider reference size is 180px at close range.
 
 ### 2. Configuration Changes
-**Never hardcode values in detector classes.** Always add to `config.py`:
+**Never hardcode values in detector classes.** Always add to `src/config.py`:
 ```python
 class TapDetectionConfig:
     TAP_MIN_DURATION = 0.05  # Centralized, documented
 ```
-Then import: `from config import TapDetectionConfig`
+Then import: `from src.config import TapDetectionConfig`
 
-Available config classes: `CameraConfig`, `MovementFilterConfig`, `GestureDetectorConfig`, `TapDetectionConfig`, `InteractionConfig`, `SIFTConfig`, `MediaPipeConfig`, `AudioConfig`, `UIConfig`, `WorkerConfig`
+Available config classes: `CameraConfig` (includes threading options), `MovementFilterConfig`, `GestureDetectorConfig`, `TapDetectionConfig`, `InteractionConfig`, `SIFTConfig`, `MediaPipeConfig`, `AudioConfig`, `UIConfig`, `WorkerConfig`
+
+**Performance Tuning:**
+- `CameraConfig.USE_THREADED_CAPTURE` - Enable non-blocking camera capture (default: True)
+- `CameraConfig.USE_THREADED_DISPLAY` - Enable non-blocking display (default: True)
+- `CameraConfig.DISPLAY_FRAME_SKIP` - Display every Nth frame (default: 4)
+- `CameraConfig.POSE_PROCESSING_SCALE` - Pose detection scale (default: 0.35)
 
 ### 3. Worker Communication Pattern
 ```python
@@ -145,8 +156,10 @@ Monitor `SIFTConfig.REDETECT_INTERVAL` (150 frames default). Higher = less CPU b
 import cv2 as cv  # Always "cv" not "cv2"
 import numpy as np
 import mediapipe as mp
-from config import *Config  # Import specific config classes
-from utils import ...  # Project utilities
+from src.config import *Config  # Configuration at src root
+from src.core.utils import ...  # Core utilities
+from src.detection import ...  # Detection modules
+from src.audio.audio import ...  # Audio components
 ```
 
 ### Naming Conventions
@@ -225,7 +238,7 @@ No formal test suite yet. Manual testing via:
 
 ## Gotchas & Known Issues
 
-1. **Camera buffering**: On Windows, `CAP_PROP_BUFFERSIZE` may not work. If latency issues occur, try different camera backend or reduce resolution.
+1. **Camera buffering**: On Windows, `CAP_PROP_BUFFERSIZE` may not work. Enable `USE_THREADED_CAPTURE=True` for better performance. If latency issues occur, try different camera backend or reduce resolution.
 
 2. **SIFT detection failures**: Requires good lighting and clear corner features on template. If map not detected, press `h` to retry or adjust `SIFT_CONTRAST_THRESHOLD` in `SIFTConfig`.
 
@@ -233,16 +246,24 @@ No formal test suite yet. Manual testing via:
 
 4. **Double-tap cooldown**: `DOUBLE_TAP_COOLDOWN_MAIN = 0.7s` prevents rapid re-triggering. If taps feel unresponsive, reduce in `TapDetectionConfig`.
 
-5. **Legacy compatibility**: `simple_camio_2d.py` and `simple_camio_mp.py` are compatibility shims. Always edit the new modular files (workers.py, pose_detector.py, etc.), not the legacy files.
+5. **Display performance**: For smooth rendering at high FPS, enable `USE_THREADED_DISPLAY=True`. This moves cv.imshow() to background thread, allowing main loop to run at 400+ FPS.
+
+6. **Legacy compatibility**: `simple_camio_2d.py` and `simple_camio_mp.py` are compatibility shims. Always edit the new modular files (workers.py, pose_detector.py, etc.), not the legacy files.
+
+4. **Double-tap cooldown**: `DOUBLE_TAP_COOLDOWN_MAIN = 0.7s` prevents rapid re-triggering. If taps feel unresponsive, reduce in `TapDetectionConfig`.
+
+5. **Display performance**: For smooth rendering at high FPS, enable `USE_THREADED_DISPLAY=True`. This moves cv.imshow() to background thread, allowing main loop to run at 400+ FPS.
+
+6. **Legacy compatibility**: `simple_camio_2d.py` and `simple_camio_mp.py` are compatibility shims. Always edit the new modular files (workers.py, pose_detector.py, etc.), not the legacy files.
 
 ## When to Read These Files
 
-- **Tuning detection**: `config.py` (all thresholds), `pose_detector.py` (detector logic)
-- **Audio issues**: `audio.py`, `workers.py` (AudioWorker)
-- **Tracking problems**: `sift_detector.py`, `SIFTConfig` in config.py
+- **Tuning detection**: `src/config.py` (all thresholds), `src/detection/pose_detector.py` (detector logic)
+- **Audio issues**: `src/audio/audio.py`, `src/core/workers.py` (AudioWorker)
+- **Tracking problems**: `src/detection/sift_detector.py`, `SIFTConfig` in src/config.py
 - **Adding features**: `ARCHITECTURE.md` (data flow), then relevant detector/worker
-- **Performance**: `CameraConfig`, worker queue sizes in `WorkerConfig`
-- **Data collection**: `tap_classifier/DATA_COLLECTION_GUIDE.md`, `TapDetectionConfig.COLLECT_TAP_DATA`
+- **Performance**: `CameraConfig` in src/config.py, worker queue sizes in `WorkerConfig`
+- **Data collection**: `src/tap_classifier/DATA_COLLECTION_GUIDE.md`, `TapDetectionConfig.COLLECT_TAP_DATA`
 
 ## Dependency Versions (Critical)
 

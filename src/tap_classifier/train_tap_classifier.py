@@ -66,7 +66,7 @@ import logging
 import json
 from pathlib import Path
 from tap_classifier.tap_classifier import TapClassifier
-from config import TapDetectionConfig
+from src.config import TapDetectionConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
