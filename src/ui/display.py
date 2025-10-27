@@ -9,7 +9,8 @@ import cv2 as cv
 import time
 import logging
 
-from src.config import UIConfig
+from src.config import UIConfig, CameraConfig
+from src.core.utils import draw_rectangle_from_points, draw_rectangle_on_image
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,6 @@ def draw_map_tracking(display_img, model_detector, interact, rect_flash_remainin
     Returns:
         tuple: (updated_image, updated_flash_remaining)
     """
-    from src.core.utils import draw_rectangle_from_points, draw_rectangle_on_image
-    
     if getattr(model_detector, 'last_rect_pts', None) is not None:
         if rect_flash_remaining > 0:
             display_img = draw_rectangle_from_points(
@@ -97,20 +96,27 @@ def setup_camera(cam_port):
     Returns:
         cv.VideoCapture: Configured camera capture object
     """
-    from src.config import CameraConfig
-    
     logger.info(f"Setting up camera on port {cam_port}")
 
     cap = cv.VideoCapture(cam_port, cv.CAP_DSHOW)
+    
+    # Set buffer size BEFORE other properties to reduce latency
+    cap.set(cv.CAP_PROP_BUFFERSIZE, CameraConfig.BUFFER_SIZE)
+    
+    # Set frame rate to target FPS if possible
+    cap.set(cv.CAP_PROP_FPS, CameraConfig.TARGET_FPS)
+    
+    # Set resolution
     cap.set(cv.CAP_PROP_FRAME_HEIGHT, CameraConfig.DEFAULT_HEIGHT)
     cap.set(cv.CAP_PROP_FRAME_WIDTH, CameraConfig.DEFAULT_WIDTH)
     cap.set(cv.CAP_PROP_FOCUS, CameraConfig.FOCUS)
-
-    # Reduce latency
-    try:
-        cap.set(cv.CAP_PROP_BUFFERSIZE, CameraConfig.BUFFER_SIZE)
-    except Exception as e:
-        logger.warning(f"Could not set camera buffer size: {e}")
+    
+    # Log actual settings
+    actual_fps = cap.get(cv.CAP_PROP_FPS)
+    actual_width = cap.get(cv.CAP_PROP_FRAME_WIDTH)
+    actual_height = cap.get(cv.CAP_PROP_FRAME_HEIGHT)
+    actual_buffer = cap.get(cv.CAP_PROP_BUFFERSIZE)
+    logger.info(f"Camera configured: {actual_width:.0f}x{actual_height:.0f} @ {actual_fps:.1f}fps, buffer={actual_buffer:.0f}")
 
     # Enable OpenCV optimizations and set a reasonable thread count
     try:

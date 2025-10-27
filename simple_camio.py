@@ -312,22 +312,36 @@ def run_main_loop(cap, components, workers, stop_event):
 
     logger.info("Starting main loop")
 
+    # Performance profiling variables
+    frame_count = 0
+    prof_start = time.time()
+    prof_times = {'capture': 0, 'gray': 0, 'feed': 0, 'lock': 0, 'draw': 0, 'ui': 0, 'show': 0, 'key': 0, 'pyglet': 0}
+
     while cap.isOpened() and not stop_event.is_set():
+        frame_start = time.time()
+        
         # Capture frame
         ret, frame = cap.read()
+        prof_times['capture'] += time.time() - frame_start
         if not ret:
             logger.error("No camera image returned")
             break
 
         # Convert to grayscale for SIFT
+        t = time.time()
         gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        prof_times['gray'] += time.time() - t
 
         # Feed worker queues
+        t = time.time()
         feed_worker_queues(frame, gray, workers, components['model_detector'])
+        prof_times['feed'] += time.time() - t
 
         # Get latest pose detection results
+        t = time.time()
         with workers['lock']:
             gesture_loc, gesture_status, annotated = workers['pose_worker'].latest
+        prof_times['lock'] += time.time() - t
 
         display_img = frame if annotated is None else annotated
 
@@ -337,6 +351,7 @@ def run_main_loop(cap, components, workers, stop_event):
             components['model_detector'].homography_updated = False
 
         # Process based on map detection status
+        t = time.time()
         if components['model_detector'].H is None:
             # Map not detected - play ambient crickets
             workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
@@ -359,22 +374,44 @@ def run_main_loop(cap, components, workers, stop_event):
                 gesture_loc, gesture_status, components, last_double_tap_ts,
                 workers['audio_worker']
             )
+        prof_times['draw'] += time.time() - t
 
         # Draw UI overlay
+        t = time.time()
         timer = draw_ui_overlay(display_img, components['model_detector'],
                                gesture_status, timer)
+        prof_times['ui'] += time.time() - t
 
         # Display the frame
+        t = time.time()
         cv.imshow('image reprojection', display_img)
-
-        # Handle keyboard input
-        waitkey = cv.waitKey(1)
+        
+        # Handle keyboard input (combine waitKey with input handling)
+        waitkey = cv.waitKey(1) & 0xFF
+        prof_times['show'] += time.time() - t
+        
+        t = time.time()
         if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
             break
+        prof_times['key'] += time.time() - t
 
         # Update Pyglet event loop
+        t = time.time()
         pyglet.clock.tick()
         pyglet.app.platform_event_loop.dispatch_posted_events()
+        prof_times['pyglet'] += time.time() - t
+
+        frame_count += 1
+        # Print profiling every 100 frames
+        if frame_count % 100 == 0:
+            elapsed = time.time() - prof_start
+            logger.info(f"=== Performance (last 100 frames, {elapsed:.2f}s, {100/elapsed:.1f} FPS) ===")
+            for key, val in prof_times.items():
+                pct = 100 * val / elapsed
+                logger.info(f"  {key:10s}: {val*1000:.1f}ms ({pct:.1f}%)")
+            # Reset counters
+            prof_start = time.time()
+            prof_times = {k: 0 for k in prof_times}
 
 
 def cleanup(cap, components, workers):

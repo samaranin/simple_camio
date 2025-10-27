@@ -21,6 +21,9 @@ class CameraConfig:
 
     # Processing scale for pose detection (smaller = faster but less accurate)
     POSE_PROCESSING_SCALE = 0.35
+    
+    # Target FPS for camera (actual may vary by camera capability)
+    TARGET_FPS = 30
 
 
 # ==================== Movement Filter Configuration ====================
