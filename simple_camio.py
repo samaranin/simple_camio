@@ -507,6 +507,13 @@ def run_main_loop(cap, components, workers, stop_event):
     last_double_tap_ts = 0.0
     rect_flash_remaining = 0
     timer = time.time() - 1
+    
+    # FPS tracking state
+    fps_state = {
+        'frame_count': 0,
+        'start_time': time.time(),
+        'fps': 0.0
+    }
 
     logger.info("Starting main loop")
 
@@ -549,8 +556,8 @@ def run_main_loop(cap, components, workers, stop_event):
 
         # Draw UI overlay
         t = time.time()
-        timer = draw_ui_overlay(display_img, components['model_detector'],
-                               gesture_status, timer)
+        timer, fps_state = draw_ui_overlay(display_img, components['model_detector'],
+                                           gesture_status, timer, fps_state)
         prof_times['ui'] += time.time() - t
 
         # Handle display and keyboard input

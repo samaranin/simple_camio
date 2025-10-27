@@ -49,7 +49,7 @@ def draw_map_tracking(display_img, model_detector, interact, rect_flash_remainin
     return display_img, rect_flash_remaining
 
 
-def draw_ui_overlay(display_img, model_detector, gesture_status, timer):
+def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_state):
     """
     Draw status information overlay on the display image.
 
@@ -58,9 +58,10 @@ def draw_ui_overlay(display_img, model_detector, gesture_status, timer):
         model_detector: SIFT detector for status
         gesture_status: Current gesture status
         timer (float): Previous frame timestamp for FPS calculation
+        fps_state (dict): FPS tracking state with keys: 'frame_count', 'start_time', 'fps'
 
     Returns:
-        float: Current timestamp (new timer value)
+        tuple: (current_timestamp, updated_fps_state)
     """
     # Tracking status
     status_text = model_detector.get_tracking_status()
@@ -74,17 +75,23 @@ def draw_ui_overlay(display_img, model_detector, gesture_status, timer):
                   cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
                   UIConfig.COLOR_YELLOW, UIConfig.FONT_THICKNESS)
 
-    # FPS counter
-    prev_time = timer
+    # FPS counter - update every second
     current_time = time.time()
-    elapsed_time = current_time - prev_time
-    if elapsed_time > 0:
-        fps_text = f"FPS: {1/elapsed_time:.1f}"
+    fps_state['frame_count'] += 1
+    elapsed = current_time - fps_state['start_time']
+    
+    if elapsed >= 1.0:  # Update FPS every second
+        fps_state['fps'] = fps_state['frame_count'] / elapsed
+        fps_state['frame_count'] = 0
+        fps_state['start_time'] = current_time
+    
+    if fps_state['fps'] > 0:
+        fps_text = f"FPS: {fps_state['fps']:.1f}"
         cv.putText(display_img, fps_text, (10, 60),
                   cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
                   UIConfig.COLOR_GREEN, UIConfig.FONT_THICKNESS)
 
-    return current_time
+    return current_time, fps_state
 
 
 def setup_camera(cam_port):
