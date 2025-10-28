@@ -45,6 +45,7 @@ class DisplayThread:
         self.thread = None
         self.running = False
         self.last_waitkey = 255  # Store last key press
+        self.key_consumed = True  # Track if key has been consumed by main loop
         self.key_lock = threading.Lock()
         
         logger.info(f"DisplayThread initialized with window '{window_name}'")
@@ -118,7 +119,9 @@ class DisplayThread:
         """
         with self.key_lock:
             key = self.last_waitkey
-            self.last_waitkey = 255  # Reset after reading
+            # Only reset after successful read of a real key press
+            if key != 255:
+                self.last_waitkey = 255  # Reset after returning actual key
             return key
     
     def _display_loop(self):
@@ -146,17 +149,23 @@ class DisplayThread:
                 # This is what makes cv.imshow() actually update
                 key = cv.waitKey(1) & 0xFF
                 
-                # Store key if pressed
+                # Store key if pressed (only update if not already holding a key)
                 if key != 255:
                     with self.key_lock:
-                        self.last_waitkey = key
+                        # Only update if previous key was consumed
+                        if self.last_waitkey == 255:
+                            self.last_waitkey = key
+                            logger.debug(f"Key pressed: {key} ({chr(key) if 32 <= key < 127 else 'special'})")
                 
             except queue.Empty:
                 # No frame available, just check for keys
                 key = cv.waitKey(1) & 0xFF
                 if key != 255:
                     with self.key_lock:
-                        self.last_waitkey = key
+                        # Only update if previous key was consumed
+                        if self.last_waitkey == 255:
+                            self.last_waitkey = key
+                            logger.debug(f"Key pressed: {key} ({chr(key) if 32 <= key < 127 else 'special'})")
             except Exception as e:
                 logger.error(f"Error in display loop: {e}", exc_info=True)
                 time.sleep(0.01)  # Avoid tight loop on error

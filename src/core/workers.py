@@ -81,6 +81,23 @@ class AudioWorker(threading.Thread):
         except queue.Full:
             logger.warning(f"Audio queue full, dropping command: {command.command_type}")
             return False
+    
+    def clear_queue(self):
+        """
+        Clear all pending commands from the queue.
+        
+        Useful before playing priority sounds like goodbye message.
+        """
+        cleared = 0
+        while True:
+            try:
+                self.command_queue.get_nowait()
+                cleared += 1
+            except queue.Empty:
+                break
+        if cleared > 0:
+            logger.info(f"Cleared {cleared} pending audio commands")
+        return cleared
 
     def run(self):
         """Main worker loop - processes audio commands from queue."""
@@ -120,7 +137,9 @@ class AudioWorker(threading.Thread):
                 self.camio_player.play_welcome()
 
             elif cmd_type == 'play_goodbye':
+                logger.info("AudioWorker executing play_goodbye command")
                 self.camio_player.play_goodbye()
+                logger.info("AudioWorker finished executing play_goodbye command")
 
             elif cmd_type == 'play_description':
                 self.camio_player.play_description()
@@ -147,6 +166,16 @@ class AudioWorker(threading.Thread):
 
         except Exception as e:
             logger.error(f"Error executing command {command.command_type}: {e}", exc_info=True)
+    
+    def play_goodbye_blocking(self):
+        """
+        Play goodbye synchronously for cleanup. Returns player object.
+        This bypasses the worker queue for shutdown scenarios.
+        
+        Returns:
+            pyglet.media.Player: Player object to keep alive during playback
+        """
+        return self.camio_player.play_goodbye(blocking=True)
 
     def stop(self):
         """Signal the worker to stop."""

@@ -81,6 +81,8 @@ class ZoneAudioPlayer:
         self.sound_files = {}
         self.hotspots = {}
         self.player = pyglet.media.Player()
+        self.welcome_player = None  # Track welcome message player
+        self.goodbye_player = None  # Track goodbye message player
         self.enable_blips = False
 
         # Load blip sound for zone transitions
@@ -130,13 +132,76 @@ class ZoneAudioPlayer:
 
     def play_welcome(self):
         """Play the welcome message."""
-        self.welcome_message.play()
+        # Stop previous welcome if still playing
+        if self.welcome_player and self.welcome_player.playing:
+            self.welcome_player.pause()
+            self.welcome_player.delete()
+        
+        self.welcome_player = self.welcome_message.play()
         logger.info("Playing welcome message")
 
-    def play_goodbye(self):
-        """Play the goodbye message."""
-        self.goodbye_message.play()
-        logger.info("Playing goodbye message")
+    def play_goodbye(self, blocking=False):
+        """
+        Play the goodbye message.
+        
+        Args:
+            blocking (bool): If True, returns player object for caller to manage.
+                           If False (default), plays asynchronously.
+        
+        Returns:
+            pyglet.media.Player or None: Player object if blocking=True, else None
+        """
+        # Stop previous goodbye if still playing
+        if self.goodbye_player and self.goodbye_player.playing:
+            logger.info("Stopping previous goodbye player")
+            self.goodbye_player.pause()
+            self.goodbye_player.delete()
+        
+        try:
+            player = self.goodbye_message.play()
+            logger.info("Playing goodbye message")
+            if blocking:
+                # Return player for caller to manage (used during shutdown)
+                return player
+            else:
+                # Store player for async playback (used during normal operation)
+                self.goodbye_player = player
+                return None
+        except Exception as e:
+            logger.error(f"Error starting goodbye player: {e}", exc_info=True)
+            raise
+    
+    def stop_all(self):
+        """
+        Stop all currently playing audio.
+        
+        Stops zone audio, welcome, goodbye, description, and blips.
+        """
+        logger.info("Stopping all ZoneAudioPlayer sounds...")
+        
+        # Stop main zone player
+        try:
+            if self.player.playing:
+                self.player.pause()
+                self.player.delete()
+        except Exception as e:
+            logger.debug(f"Error stopping main player: {e}")
+        
+        # Stop welcome player
+        try:
+            if self.welcome_player and self.welcome_player.playing:
+                self.welcome_player.pause()
+                self.welcome_player.delete()
+        except Exception as e:
+            logger.debug(f"Error stopping welcome player: {e}")
+        
+        # Stop goodbye player
+        try:
+            if self.goodbye_player and self.goodbye_player.playing:
+                self.goodbye_player.pause()
+                self.goodbye_player.delete()
+        except Exception as e:
+            logger.debug(f"Error stopping goodbye player: {e}")
 
     def convey(self, zone, status):
         """

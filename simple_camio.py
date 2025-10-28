@@ -472,7 +472,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         # Non-blocking display via thread
         if should_display and display_thread:
             display_thread.show(display_img)
-        # Get keyboard input from display thread
+        # Get keyboard input from display thread (always check, even if not displaying)
         waitkey = display_thread.get_last_key() if display_thread else 255
     else:
         # Blocking display (traditional)
@@ -480,6 +480,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
             cv.imshow('image reprojection', display_img)
             waitkey = cv.waitKey(1) & 0xFF
         else:
+            # Still need to call waitKey to process window events
             waitkey = cv.waitKey(1) & 0xFF
     prof_times['show'] += time.time() - t
     
@@ -623,6 +624,33 @@ def run_main_loop(cap, components, workers, stop_event):
         display_thread.stop()
 
 
+def stop_all_sounds(components):
+    """
+    Stop all currently playing sounds.
+    
+    Args:
+        components (dict): System components containing audio players
+    """
+    logger.info("Stopping all sounds...")
+    
+    # Stop ambient sounds
+    try:
+        components['heartbeat_player'].pause_sound()
+    except Exception as e:
+        logger.debug(f"Error stopping heartbeat: {e}")
+    
+    try:
+        components['crickets_player'].pause_sound()
+    except Exception as e:
+        logger.debug(f"Error stopping crickets: {e}")
+    
+    # Stop all zone audio player sounds (includes welcome, goodbye, description, zones)
+    try:
+        components['camio_player'].stop_all()
+    except Exception as e:
+        logger.debug(f"Error stopping camio_player: {e}")
+
+
 def cleanup(cap, components, workers):
     """
     Clean up resources and shut down gracefully.
@@ -656,15 +684,47 @@ def cleanup(cap, components, workers):
     except Exception as e:
         logger.error(f"Error saving collected tap data: {e}", exc_info=True)
 
-    # Play goodbye message through audio worker before stopping it
+    # Stop all currently playing sounds before goodbye
+    stop_all_sounds(components)
+    
+    # Clear any pending audio commands in the queue
+    workers['audio_worker'].clear_queue()
+
+    # Play goodbye using AudioWorker's blocking method (cleaner architecture)
+    # This method bypasses the async queue and returns a player object
     try:
-        workers['audio_worker'].enqueue_command(AudioCommand('play_goodbye'))
-        # Give it a moment to play
-        time.sleep(0.5)
+        logger.info("Playing goodbye message via AudioWorker blocking method...")
+        
+        goodbye_player = workers['audio_worker'].play_goodbye_blocking()
+        logger.info(f"Goodbye player created: {goodbye_player}")
+        
+        # Keep pyglet event loop running so audio can actually play
+        goodbye_start = time.time()
+        goodbye_duration = 3.0
+        logger.info(f"Running pyglet event loop for {goodbye_duration}s to play goodbye...")
+        
+        while time.time() - goodbye_start < goodbye_duration:
+            # Check if player is still alive and playing
+            if goodbye_player:
+                pyglet.clock.tick()
+                pyglet.app.platform_event_loop.dispatch_posted_events()
+            time.sleep(0.01)  # Small sleep to avoid busy-waiting
+            
+        logger.info("Goodbye message playback time completed")
+        
+        # Clean up goodbye player
+        if goodbye_player:
+            try:
+                goodbye_player.pause()
+                goodbye_player.delete()
+            except Exception as e:
+                logger.debug(f"Error cleaning up goodbye player: {e}")
+                
     except Exception as e:
-        logger.error(f"Error queueing goodbye message: {e}")
+        logger.error(f"Error playing goodbye message: {e}", exc_info=True)
 
     # Stop worker threads
+    logger.info("Stopping worker threads...")
     workers['pose_worker'].stop()
     workers['sift_worker'].stop()
     workers['audio_worker'].stop()
@@ -673,13 +733,6 @@ def cleanup(cap, components, workers):
     workers['pose_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
     workers['sift_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
     workers['audio_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
-
-    # Stop ambient sounds
-    components['heartbeat_player'].pause_sound()
-    components['crickets_player'].pause_sound()
-
-    # Brief delay for audio to finish
-    time.sleep(1)
 
     # Release camera and close windows
     cap.release()
