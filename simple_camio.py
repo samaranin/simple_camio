@@ -700,8 +700,7 @@ def cleanup(cap, components, workers):
         
         # Keep pyglet event loop running so audio can actually play
         goodbye_start = time.time()
-        goodbye_duration = 3.0
-        logger.info(f"Running pyglet event loop for {goodbye_duration}s to play goodbye...")
+        goodbye_duration = 1.0
         
         while time.time() - goodbye_start < goodbye_duration:
             # Check if player is still alive and playing
