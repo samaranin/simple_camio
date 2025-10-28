@@ -64,6 +64,10 @@ Available config classes: `CameraConfig` (includes threading options), `Movement
 - `CameraConfig.DISPLAY_FRAME_SKIP` - Display every Nth frame (default: 4)
 - `CameraConfig.POSE_PROCESSING_SCALE` - Pose detection scale (default: 0.35)
 
+**Audio Configuration:**
+- `AudioConfig.HEARTBEAT_VOLUME` - Volume for heartbeat ambient sound (default: 0.05)
+- `AudioConfig.PLAY_DESCRIPTION_ONCE` - If True: play map description only once (first hand). If False: play every time hand appears to support multiple users (default: False)
+
 ### 3. Worker Communication Pattern
 ```python
 # Enqueue (non-blocking, drop if full)

@@ -270,6 +270,11 @@ class AudioConfig:
 
     # Ambient sound volume levels
     HEARTBEAT_VOLUME = 0.05
+    
+    # Map description playback mode
+    # If True: Play map description only once (first hand detection)
+    # If False: Play map description every time a hand appears (supports multiple users)
+    PLAY_DESCRIPTION_ONCE = False
 
 
 # ==================== UI Configuration ====================

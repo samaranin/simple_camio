@@ -137,9 +137,6 @@ def create_worker_threads(components, stop_event):
     sift_worker.start()
     audio_worker.start()
 
-    # Play welcome message through audio worker
-    audio_worker.enqueue_command(AudioCommand('play_welcome'))
-
     logger.info("Worker threads started")
 
     return {
@@ -205,7 +202,8 @@ def feed_worker_queues(frame, gray, workers, model_detector):
 
 
 def process_gestures_and_audio(gesture_loc, gesture_status, components,
-                               last_double_tap_ts, audio_worker):
+                               last_double_tap_ts, audio_worker, hand_was_detected,
+                               map_description_played):
     """
     Process detected gestures and trigger appropriate audio feedback.
 
@@ -215,13 +213,43 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         components (dict): System components
         last_double_tap_ts (float): Timestamp of last double-tap
         audio_worker (AudioWorker): Audio worker for non-blocking playback
+        hand_was_detected (bool): Whether hand was detected in previous frame
+        map_description_played (bool): Whether map description has been played
 
     Returns:
-        float: Updated last_double_tap_ts
+        tuple: (updated_last_double_tap_ts, hand_currently_detected, map_description_played)
     """
     if not is_gesture_valid(gesture_loc):
-        audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
-        return last_double_tap_ts
+        # No hand detected - switch to crickets
+        if hand_was_detected:
+            audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
+            audio_worker.enqueue_command(AudioCommand('crickets_play'))
+        return last_double_tap_ts, False, map_description_played
+
+    # Hand detected
+    if not hand_was_detected:
+        # Hand just appeared - pause crickets, play map description, start heartbeat
+        audio_worker.enqueue_command(AudioCommand('crickets_pause'))
+        
+        # Play map description based on config
+        if AudioConfig.PLAY_DESCRIPTION_ONCE:
+            # Play only once (first time ever)
+            if not map_description_played:
+                audio_worker.enqueue_command(AudioCommand('play_description'))
+                map_description_played = True
+        else:
+            # Play every time hand appears (supports multiple users)
+            audio_worker.enqueue_command(AudioCommand('play_description'))
+        
+        audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
+        
+        # Update zone tracking but reset audio state to prevent playing zone audio on first appearance
+        zone_id = components['interact'].push_gesture(gesture_loc)
+        # Reset the zone audio player's state so it doesn't think this is a zone change
+        components['camio_player'].prev_zone_name = components['camio_player'].hotspots.get(zone_id, {}).get('textDescription', '')
+        
+        # Don't play zone audio on first appearance - just return
+        return last_double_tap_ts, True, map_description_played
 
     # Handle double-tap
     if gesture_status == 'double_tap':
@@ -239,13 +267,12 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
                 logger.error(f"Error handling double_tap: {e}")
     else:
         # Normal gesture processing
-        audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
         zone_id = components['interact'].push_gesture(gesture_loc)
         audio_worker.enqueue_command(
             AudioCommand('play_zone', zone_id=zone_id, gesture_status=gesture_status)
         )
 
-    return last_double_tap_ts
+    return last_double_tap_ts, True, map_description_played
 
 
 def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
@@ -364,7 +391,8 @@ def get_pose_results(workers, prof_times):
 
 
 def process_map_detection(components, workers, display_img, rect_flash_remaining, 
-                          gesture_loc, gesture_status, last_double_tap_ts, prof_times):
+                          gesture_loc, gesture_status, last_double_tap_ts, prof_times,
+                          hand_was_detected, map_description_played):
     """
     Process map detection status and handle gestures/audio.
     
@@ -377,16 +405,20 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
         gesture_status: Current gesture status
         last_double_tap_ts (float): Last double-tap timestamp
         prof_times (dict): Performance timing dictionary
+        hand_was_detected (bool): Whether hand was detected in previous frame
+        map_description_played (bool): Whether map description has been played
         
     Returns:
-        tuple: (updated_display_img, rect_flash_remaining, last_double_tap_ts)
+        tuple: (updated_display_img, rect_flash_remaining, last_double_tap_ts, hand_currently_detected, map_description_played)
     """
     t = time.time()
     
     if components['model_detector'].H is None:
         # Map not detected - play ambient crickets
-        workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
-        workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
+        if hand_was_detected:
+            workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
+            workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
+        hand_currently_detected = False
     else:
         # Map detected - increment age counter
         try:
@@ -401,13 +433,13 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
         )
 
         # Process gestures and audio
-        last_double_tap_ts = process_gestures_and_audio(
+        last_double_tap_ts, hand_currently_detected, map_description_played = process_gestures_and_audio(
             gesture_loc, gesture_status, components, last_double_tap_ts,
-            workers['audio_worker']
+            workers['audio_worker'], hand_was_detected, map_description_played
         )
     
     prof_times['draw'] += time.time() - t
-    return display_img, rect_flash_remaining, last_double_tap_ts
+    return display_img, rect_flash_remaining, last_double_tap_ts, hand_currently_detected, map_description_played
 
 
 def handle_display_and_input(display_img, display_frame_counter, display_thread, 
@@ -440,7 +472,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         # Non-blocking display via thread
         if should_display and display_thread:
             display_thread.show(display_img)
-        # Get keyboard input from display thread
+        # Get keyboard input from display thread (always check, even if not displaying)
         waitkey = display_thread.get_last_key() if display_thread else 255
     else:
         # Blocking display (traditional)
@@ -448,6 +480,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
             cv.imshow('image reprojection', display_img)
             waitkey = cv.waitKey(1) & 0xFF
         else:
+            # Still need to call waitKey to process window events
             waitkey = cv.waitKey(1) & 0xFF
     prof_times['show'] += time.time() - t
     
@@ -507,6 +540,8 @@ def run_main_loop(cap, components, workers, stop_event):
     last_double_tap_ts = 0.0
     rect_flash_remaining = 0
     timer = time.time() - 1
+    hand_was_detected = False  # Track hand detection state for audio switching
+    map_description_played = False  # Track if map description has been played once
     
     # FPS tracking state
     fps_state = {
@@ -526,6 +561,10 @@ def run_main_loop(cap, components, workers, stop_event):
     
     # Initialize display system
     display_thread = initialize_display(CameraConfig.USE_THREADED_DISPLAY)
+
+    # Play welcome message at startup and start with crickets
+    workers['audio_worker'].enqueue_command(AudioCommand('play_welcome'))
+    workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
 
     # Main processing loop
     while cap.isOpened() and not stop_event.is_set():
@@ -549,9 +588,10 @@ def run_main_loop(cap, components, workers, stop_event):
             components['model_detector'].homography_updated = False
 
         # Process map detection and gestures
-        display_img, rect_flash_remaining, last_double_tap_ts = process_map_detection(
+        display_img, rect_flash_remaining, last_double_tap_ts, hand_was_detected, map_description_played = process_map_detection(
             components, workers, display_img, rect_flash_remaining,
-            gesture_loc, gesture_status, last_double_tap_ts, prof_times
+            gesture_loc, gesture_status, last_double_tap_ts, prof_times,
+            hand_was_detected, map_description_played
         )
 
         # Draw UI overlay
@@ -582,6 +622,33 @@ def run_main_loop(cap, components, workers, stop_event):
     # Cleanup display thread
     if display_thread:
         display_thread.stop()
+
+
+def stop_all_sounds(components):
+    """
+    Stop all currently playing sounds.
+    
+    Args:
+        components (dict): System components containing audio players
+    """
+    logger.info("Stopping all sounds...")
+    
+    # Stop ambient sounds
+    try:
+        components['heartbeat_player'].pause_sound()
+    except Exception as e:
+        logger.debug(f"Error stopping heartbeat: {e}")
+    
+    try:
+        components['crickets_player'].pause_sound()
+    except Exception as e:
+        logger.debug(f"Error stopping crickets: {e}")
+    
+    # Stop all zone audio player sounds (includes welcome, goodbye, description, zones)
+    try:
+        components['camio_player'].stop_all()
+    except Exception as e:
+        logger.debug(f"Error stopping camio_player: {e}")
 
 
 def cleanup(cap, components, workers):
@@ -617,15 +684,47 @@ def cleanup(cap, components, workers):
     except Exception as e:
         logger.error(f"Error saving collected tap data: {e}", exc_info=True)
 
-    # Play goodbye message through audio worker before stopping it
+    # Stop all currently playing sounds before goodbye
+    stop_all_sounds(components)
+    
+    # Clear any pending audio commands in the queue
+    workers['audio_worker'].clear_queue()
+
+    # Play goodbye using AudioWorker's blocking method (cleaner architecture)
+    # This method bypasses the async queue and returns a player object
     try:
-        workers['audio_worker'].enqueue_command(AudioCommand('play_goodbye'))
-        # Give it a moment to play
-        time.sleep(0.5)
+        logger.info("Playing goodbye message via AudioWorker blocking method...")
+        
+        goodbye_player = workers['audio_worker'].play_goodbye_blocking()
+        logger.info(f"Goodbye player created: {goodbye_player}")
+        
+        # Keep pyglet event loop running so audio can actually play
+        goodbye_start = time.time()
+        goodbye_duration = 3.0
+        logger.info(f"Running pyglet event loop for {goodbye_duration}s to play goodbye...")
+        
+        while time.time() - goodbye_start < goodbye_duration:
+            # Check if player is still alive and playing
+            if goodbye_player:
+                pyglet.clock.tick()
+                pyglet.app.platform_event_loop.dispatch_posted_events()
+            time.sleep(0.01)  # Small sleep to avoid busy-waiting
+            
+        logger.info("Goodbye message playback time completed")
+        
+        # Clean up goodbye player
+        if goodbye_player:
+            try:
+                goodbye_player.pause()
+                goodbye_player.delete()
+            except Exception as e:
+                logger.debug(f"Error cleaning up goodbye player: {e}")
+                
     except Exception as e:
-        logger.error(f"Error queueing goodbye message: {e}")
+        logger.error(f"Error playing goodbye message: {e}", exc_info=True)
 
     # Stop worker threads
+    logger.info("Stopping worker threads...")
     workers['pose_worker'].stop()
     workers['sift_worker'].stop()
     workers['audio_worker'].stop()
@@ -634,13 +733,6 @@ def cleanup(cap, components, workers):
     workers['pose_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
     workers['sift_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
     workers['audio_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
-
-    # Stop ambient sounds
-    components['heartbeat_player'].pause_sound()
-    components['crickets_player'].pause_sound()
-
-    # Brief delay for audio to finish
-    time.sleep(1)
 
     # Release camera and close windows
     cap.release()
