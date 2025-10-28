@@ -122,6 +122,9 @@ class AudioWorker(threading.Thread):
             elif cmd_type == 'play_goodbye':
                 self.camio_player.play_goodbye()
 
+            elif cmd_type == 'play_description':
+                self.camio_player.play_description()
+
             elif cmd_type == 'heartbeat_play':
                 self.heartbeat_player.play_sound()
 
