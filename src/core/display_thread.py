@@ -113,15 +113,14 @@ class DisplayThread:
     def get_last_key(self):
         """
         Get the last key pressed (non-blocking).
+        Clears the stored key after reading to prevent duplicate processing.
         
         Returns:
             int: Last key code (255 if no key pressed)
         """
         with self.key_lock:
             key = self.last_waitkey
-            # Only reset after successful read of a real key press
-            if key != 255:
-                self.last_waitkey = 255  # Reset after returning actual key
+            self.last_waitkey = 255  # Always reset after reading
             return key
     
     def _display_loop(self):
@@ -149,23 +148,22 @@ class DisplayThread:
                 # This is what makes cv.imshow() actually update
                 key = cv.waitKey(1) & 0xFF
                 
-                # Store key if pressed (only update if not already holding a key)
+                # Store key if pressed
                 if key != 255:
                     with self.key_lock:
-                        # Only update if previous key was consumed
-                        if self.last_waitkey == 255:
-                            self.last_waitkey = key
-                            logger.debug(f"Key pressed: {key} ({chr(key) if 32 <= key < 127 else 'special'})")
+                        # Always update to capture the latest key press
+                        # Critical keys like 'q' should not be missed
+                        self.last_waitkey = key
+                        logger.debug(f"Key pressed: {key} ({chr(key) if 32 <= key < 127 else 'special'})")
                 
             except queue.Empty:
                 # No frame available, just check for keys
                 key = cv.waitKey(1) & 0xFF
                 if key != 255:
                     with self.key_lock:
-                        # Only update if previous key was consumed
-                        if self.last_waitkey == 255:
-                            self.last_waitkey = key
-                            logger.debug(f"Key pressed: {key} ({chr(key) if 32 <= key < 127 else 'special'})")
+                        # Always update to capture the latest key press
+                        self.last_waitkey = key
+                        logger.debug(f"Key pressed: {key} ({chr(key) if 32 <= key < 127 else 'special'})")
             except Exception as e:
                 logger.error(f"Error in display loop: {e}", exc_info=True)
                 time.sleep(0.01)  # Avoid tight loop on error

@@ -41,6 +41,17 @@ class InteractionPolicy2D:
 
         logger.info(f"Initialized interaction policy with Z threshold: {self.Z_THRESHOLD} cm")
 
+    def reset_zone_filter(self):
+        """
+        Reset the zone filter buffer.
+        
+        This should be called when a hand first appears to clear any stale
+        zone data and ensure clean tracking from the start.
+        """
+        self.zone_filter = -1 * np.ones(self.ZONE_FILTER_SIZE, dtype=int)
+        self.zone_filter_cnt = 0
+        logger.debug("Zone filter reset")
+
     def _mode_int(self, arr):
         """
         Fast mode for small integer arrays; ignores values < 0 (e.g., -1 placeholders).

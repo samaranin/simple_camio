@@ -217,7 +217,9 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
     Returns:
         tuple: (updated_last_double_tap_ts, updated_hand_state)
     """
-    ZONE_AUDIO_COOLDOWN = 0.5  # Don't play zone audio for 0.5s after hand appears
+    # Cooldown should be longer than zone filter stabilization time
+    # Zone filter uses 10 samples at ~30-60fps = ~0.3s to stabilize
+    ZONE_AUDIO_COOLDOWN = 0.8  # Increased to ensure filter stabilizes before playing audio
     
     if not is_gesture_valid(gesture_loc):
         # No hand detected - switch to crickets
@@ -245,6 +247,9 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
             audio_worker.enqueue_command(AudioCommand('play_description'))
         
         audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
+        
+        # Reset zone filter to ensure clean tracking from start
+        components['interact'].reset_zone_filter()
         
         # Update zone tracking and set prev_zone_name to prevent zone audio on first appearance
         zone_id = components['interact'].push_gesture(gesture_loc)
@@ -284,7 +289,11 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         )
     else:
         # In cooldown - update zone tracking but don't play audio
-        components['interact'].push_gesture(gesture_loc)
+        zone_id = components['interact'].push_gesture(gesture_loc)
+        # Also update prev_zone_name to track current zone during cooldown
+        # This prevents audio from playing when cooldown expires
+        if zone_id in components['camio_player'].hotspots:
+            components['camio_player'].prev_zone_name = components['camio_player'].hotspots[zone_id]['textDescription']
 
     return last_double_tap_ts, hand_state
 
@@ -486,7 +495,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         # Non-blocking display via thread
         if should_display and display_thread:
             display_thread.show(display_img)
-        # Get keyboard input from display thread (always check, even if not displaying)
+        # ALWAYS check keyboard input (critical for 'q' to work reliably)
         waitkey = display_thread.get_last_key() if display_thread else 255
     else:
         # Blocking display (traditional)
@@ -590,6 +599,10 @@ def run_main_loop(cap, components, workers, stop_event):
         # Capture and preprocess frame
         success, frame, gray = capture_and_preprocess(cap, prof_times)
         if not success:
+            break
+        
+        # Early exit check for responsiveness
+        if stop_event.is_set():
             break
 
         # Feed worker queues
