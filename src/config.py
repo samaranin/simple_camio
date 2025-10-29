@@ -287,6 +287,7 @@ class UIConfig:
     # Colors (BGR format)
     COLOR_GREEN = (0, 255, 0)
     COLOR_YELLOW = (0, 255, 255)
+    COLOR_CYAN = (255, 255, 0)
     COLOR_BLUE = (255, 0, 0)
 
     # Text display

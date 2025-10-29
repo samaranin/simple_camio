@@ -466,10 +466,10 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
 
 
 def handle_display_and_input(display_img, display_frame_counter, display_thread, 
-                             stop_event, frame, workers, components, prof_times):
+                             stop_event, frame, workers, components, prof_times, fps_state):
     """
     Handle frame display and keyboard input.
-    
+
     Args:
         display_img: Image to display
         display_frame_counter (int): Frame skip counter
@@ -479,9 +479,10 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         workers (dict): Worker threads
         components (dict): System components
         prof_times (dict): Performance timing dictionary
+        fps_state (dict): FPS tracking state
         
     Returns:
-        tuple: (should_continue, updated_counter)
+        tuple: (should_continue, updated_counter, updated_fps_state)
     """
     # Check if should display this frame
     display_frame_counter += 1
@@ -515,9 +516,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
             should_continue = False
     prof_times['key'] += time.time() - t
     
-    return should_continue, display_frame_counter
-
-
+    return should_continue, display_frame_counter, fps_state
 def update_performance_stats(frame_count, prof_start, prof_times, PROF_INTERVAL):
     """
     Update and log performance statistics.
@@ -573,9 +572,9 @@ def run_main_loop(cap, components, workers, stop_event):
     
     # FPS tracking state
     fps_state = {
-        'frame_count': 0,
+        'display_count': 0,     # Counts only displayed frames
         'start_time': time.time(),
-        'fps': 0.0
+        'display_fps': 0.0      # Actual display update rate
     }
 
     logger.info("Starting main loop")
@@ -628,13 +627,13 @@ def run_main_loop(cap, components, workers, stop_event):
         # Draw UI overlay
         t = time.time()
         timer, fps_state = draw_ui_overlay(display_img, components['model_detector'],
-                                           gesture_status, timer, fps_state)
+                                           gesture_status, timer, fps_state, cap)
         prof_times['ui'] += time.time() - t
 
         # Handle display and keyboard input
-        should_continue, display_frame_counter = handle_display_and_input(
+        should_continue, display_frame_counter, fps_state = handle_display_and_input(
             display_img, display_frame_counter, display_thread,
-            stop_event, frame, workers, components, prof_times
+            stop_event, frame, workers, components, prof_times, fps_state
         )
         if not should_continue:
             break

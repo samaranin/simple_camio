@@ -49,7 +49,7 @@ def draw_map_tracking(display_img, model_detector, interact, rect_flash_remainin
     return display_img, rect_flash_remaining
 
 
-def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_state):
+def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_state, cap):
     """
     Draw status information overlay on the display image.
 
@@ -58,7 +58,9 @@ def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_stat
         model_detector: SIFT detector for status
         gesture_status: Current gesture status
         timer (float): Previous frame timestamp for FPS calculation
-        fps_state (dict): FPS tracking state with keys: 'frame_count', 'start_time', 'fps'
+        fps_state (dict): FPS tracking state with keys: 'display_count', 
+                         'start_time', 'display_fps'
+        cap: Camera capture object (to get camera FPS)
 
     Returns:
         tuple: (current_timestamp, updated_fps_state)
@@ -71,25 +73,45 @@ def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_stat
 
     # Gesture status
     if gesture_status:
-        cv.putText(display_img, f"Gesture: {gesture_status}", (10, 90),
+        cv.putText(display_img, f"Gesture: {gesture_status}", (10, 120),
                   cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
                   UIConfig.COLOR_YELLOW, UIConfig.FONT_THICKNESS)
 
-    # FPS counter - update every second
+    # FPS counters - update display FPS every second
     current_time = time.time()
-    fps_state['frame_count'] += 1
+    fps_state['display_count'] += 1
     elapsed = current_time - fps_state['start_time']
     
     if elapsed >= 1.0:  # Update FPS every second
-        fps_state['fps'] = fps_state['frame_count'] / elapsed
-        fps_state['frame_count'] = 0
+        fps_state['display_fps'] = fps_state['display_count'] / elapsed
+        fps_state['display_count'] = 0
         fps_state['start_time'] = current_time
     
-    if fps_state['fps'] > 0:
-        fps_text = f"FPS: {fps_state['fps']:.1f}"
-        cv.putText(display_img, fps_text, (10, 60),
+    # Get camera FPS from the capture device
+    camera_fps = 0.0
+    try:
+        if hasattr(cap, 'get_fps'):
+            # ThreadedCamera has get_fps() method
+            camera_fps = cap.get_fps()
+        elif hasattr(cap, 'get'):
+            # Regular VideoCapture - use CAP_PROP_FPS (not always accurate for actual rate)
+            camera_fps = cap.get(cv.CAP_PROP_FPS)
+    except Exception:
+        camera_fps = 0.0
+    
+    # Display camera FPS (actual capture rate from device)
+    if camera_fps > 0:
+        camera_fps_text = f"Camera: {camera_fps:.1f} FPS"
+        cv.putText(display_img, camera_fps_text, (10, 60),
                   cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
                   UIConfig.COLOR_GREEN, UIConfig.FONT_THICKNESS)
+    
+    # Display actual processing/rendering FPS
+    if fps_state['display_fps'] > 0:
+        display_fps_text = f"Processing: {fps_state['display_fps']:.1f} FPS"
+        cv.putText(display_img, display_fps_text, (10, 90),
+                  cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
+                  UIConfig.COLOR_CYAN, UIConfig.FONT_THICKNESS)
 
     return current_time, fps_state
 
