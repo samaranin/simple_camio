@@ -202,8 +202,7 @@ def feed_worker_queues(frame, gray, workers, model_detector):
 
 
 def process_gestures_and_audio(gesture_loc, gesture_status, components,
-                               last_double_tap_ts, audio_worker, hand_was_detected,
-                               map_description_played):
+                               last_double_tap_ts, audio_worker, hand_state):
     """
     Process detected gestures and trigger appropriate audio feedback.
 
@@ -213,48 +212,60 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         components (dict): System components
         last_double_tap_ts (float): Timestamp of last double-tap
         audio_worker (AudioWorker): Audio worker for non-blocking playback
-        hand_was_detected (bool): Whether hand was detected in previous frame
-        map_description_played (bool): Whether map description has been played
+        hand_state (dict): Hand detection state tracking
 
     Returns:
-        tuple: (updated_last_double_tap_ts, hand_currently_detected, map_description_played)
+        tuple: (updated_last_double_tap_ts, updated_hand_state)
     """
+    ZONE_AUDIO_COOLDOWN = 0.5  # Don't play zone audio for 0.5s after hand appears
+    
     if not is_gesture_valid(gesture_loc):
         # No hand detected - switch to crickets
-        if hand_was_detected:
+        if hand_state['was_detected']:
             audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
             audio_worker.enqueue_command(AudioCommand('crickets_play'))
-        return last_double_tap_ts, False, map_description_played
+        
+        # Reset hand state
+        hand_state['was_detected'] = False
+        hand_state['first_detected_ts'] = 0.0
+        return last_double_tap_ts, hand_state
 
     # Hand detected
-    if not hand_was_detected:
+    if not hand_state['was_detected']:
         # Hand just appeared - pause crickets, play map description, start heartbeat
         audio_worker.enqueue_command(AudioCommand('crickets_pause'))
         
         # Play map description based on config
         if AudioConfig.PLAY_DESCRIPTION_ONCE:
-            # Play only once (first time ever)
-            if not map_description_played:
+            if not hand_state['description_played']:
                 audio_worker.enqueue_command(AudioCommand('play_description'))
-                map_description_played = True
+                hand_state['description_played'] = True
         else:
             # Play every time hand appears (supports multiple users)
             audio_worker.enqueue_command(AudioCommand('play_description'))
         
         audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
         
-        # Update zone tracking but reset audio state to prevent playing zone audio on first appearance
+        # Update zone tracking and set prev_zone_name to prevent zone audio on first appearance
         zone_id = components['interact'].push_gesture(gesture_loc)
-        # Reset the zone audio player's state so it doesn't think this is a zone change
-        components['camio_player'].prev_zone_name = components['camio_player'].hotspots.get(zone_id, {}).get('textDescription', '')
+        if zone_id in components['camio_player'].hotspots:
+            components['camio_player'].prev_zone_name = components['camio_player'].hotspots[zone_id]['textDescription']
+        else:
+            components['camio_player'].prev_zone_name = None
         
-        # Don't play zone audio on first appearance - just return
-        return last_double_tap_ts, True, map_description_played
+        # Update hand state
+        hand_state['was_detected'] = True
+        hand_state['first_detected_ts'] = time.time()
+        
+        return last_double_tap_ts, hand_state
+
+    # Check if we're still in the cooldown period after hand first appeared
+    time_since_first_detection = time.time() - hand_state['first_detected_ts'] if hand_state['first_detected_ts'] > 0 else 999
+    in_cooldown = time_since_first_detection < ZONE_AUDIO_COOLDOWN
 
     # Handle double-tap
     if gesture_status == 'double_tap':
         now = time.time()
-        # Suppress repeated processing of same double-tap
         if now - last_double_tap_ts > TapDetectionConfig.DOUBLE_TAP_COOLDOWN_MAIN:
             try:
                 zone_id = components['interact'].push_gesture(gesture_loc)
@@ -265,14 +276,17 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
                 logger.info(f"Double-tap processed for zone {zone_id}")
             except Exception as e:
                 logger.error(f"Error handling double_tap: {e}")
-    else:
-        # Normal gesture processing
+    elif not in_cooldown:
+        # Normal gesture processing (only if not in cooldown)
         zone_id = components['interact'].push_gesture(gesture_loc)
         audio_worker.enqueue_command(
             AudioCommand('play_zone', zone_id=zone_id, gesture_status=gesture_status)
         )
+    else:
+        # In cooldown - update zone tracking but don't play audio
+        components['interact'].push_gesture(gesture_loc)
 
-    return last_double_tap_ts, True, map_description_played
+    return last_double_tap_ts, hand_state
 
 
 def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
@@ -392,7 +406,7 @@ def get_pose_results(workers, prof_times):
 
 def process_map_detection(components, workers, display_img, rect_flash_remaining, 
                           gesture_loc, gesture_status, last_double_tap_ts, prof_times,
-                          hand_was_detected, map_description_played):
+                          hand_state):
     """
     Process map detection status and handle gestures/audio.
     
@@ -405,20 +419,20 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
         gesture_status: Current gesture status
         last_double_tap_ts (float): Last double-tap timestamp
         prof_times (dict): Performance timing dictionary
-        hand_was_detected (bool): Whether hand was detected in previous frame
-        map_description_played (bool): Whether map description has been played
+        hand_state (dict): Hand detection state tracking
         
     Returns:
-        tuple: (updated_display_img, rect_flash_remaining, last_double_tap_ts, hand_currently_detected, map_description_played)
+        tuple: (updated_display_img, rect_flash_remaining, last_double_tap_ts, updated_hand_state)
     """
     t = time.time()
     
     if components['model_detector'].H is None:
         # Map not detected - play ambient crickets
-        if hand_was_detected:
+        if hand_state['was_detected']:
             workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
             workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
-        hand_currently_detected = False
+        hand_state['was_detected'] = False
+        hand_state['first_detected_ts'] = 0.0
     else:
         # Map detected - increment age counter
         try:
@@ -433,13 +447,13 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
         )
 
         # Process gestures and audio
-        last_double_tap_ts, hand_currently_detected, map_description_played = process_gestures_and_audio(
+        last_double_tap_ts, hand_state = process_gestures_and_audio(
             gesture_loc, gesture_status, components, last_double_tap_ts,
-            workers['audio_worker'], hand_was_detected, map_description_played
+            workers['audio_worker'], hand_state
         )
     
     prof_times['draw'] += time.time() - t
-    return display_img, rect_flash_remaining, last_double_tap_ts, hand_currently_detected, map_description_played
+    return display_img, rect_flash_remaining, last_double_tap_ts, hand_state
 
 
 def handle_display_and_input(display_img, display_frame_counter, display_thread, 
@@ -540,8 +554,13 @@ def run_main_loop(cap, components, workers, stop_event):
     last_double_tap_ts = 0.0
     rect_flash_remaining = 0
     timer = time.time() - 1
-    hand_was_detected = False  # Track hand detection state for audio switching
-    map_description_played = False  # Track if map description has been played once
+    
+    # Hand detection state (consolidated into one dict)
+    hand_state = {
+        'was_detected': False,         # Whether hand was detected in previous frame
+        'description_played': False,   # Whether map description has been played once
+        'first_detected_ts': 0.0       # Timestamp when hand was first detected (for cooldown)
+    }
     
     # FPS tracking state
     fps_state = {
@@ -588,10 +607,9 @@ def run_main_loop(cap, components, workers, stop_event):
             components['model_detector'].homography_updated = False
 
         # Process map detection and gestures
-        display_img, rect_flash_remaining, last_double_tap_ts, hand_was_detected, map_description_played = process_map_detection(
+        display_img, rect_flash_remaining, last_double_tap_ts, hand_state = process_map_detection(
             components, workers, display_img, rect_flash_remaining,
-            gesture_loc, gesture_status, last_double_tap_ts, prof_times,
-            hand_was_detected, map_description_played
+            gesture_loc, gesture_status, last_double_tap_ts, prof_times, hand_state
         )
 
         # Draw UI overlay
