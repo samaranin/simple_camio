@@ -11,6 +11,7 @@ Description: Simple CamIO 2D is a Python version of CamIO specialized to a flat,
 - **SIFT Tracking**: Robust map tracking using SIFT/ORB feature matching
 - **Threaded Architecture**: Non-blocking camera capture and display for high performance (400+ FPS)
 - **Data Collection**: Automatic collection of tap detection data for classifier training
+- **Headless Mode**: Run without display window - perfect for Raspberry Pi daemon deployment
 
 ## Data Collection and Classifier Training
 
@@ -54,6 +55,13 @@ To run with a custom map:
 ```powershell
 python simple_camio.py --input1 models/UkraineMap/UkraineMap.json
 ```
+
+To run in headless mode (no display window, suitable for Raspberry Pi daemon):
+```bash
+python simple_camio.py --headless
+```
+
+See [RASPBERRY_PI_DAEMON.md](RASPBERRY_PI_DAEMON.md) for detailed instructions on running as a Linux daemon/service.
 
 ### Keyboard Controls
 

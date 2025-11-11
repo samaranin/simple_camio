@@ -9,6 +9,9 @@ PERFORMANCE TUNING:
 - For quality: Set DEFAULT_WIDTH=1920, DEFAULT_HEIGHT=1080, but expect lower FPS
 - If camera is slow: Enable USE_THREADED_CAPTURE and try BACKEND=cv.CAP_MSMF
 """
+import os
+import cv2 as cv
+
 
 # ==================== Camera Configuration ====================
 class CameraConfig:
@@ -49,7 +52,16 @@ class CameraConfig:
     # DSHOW: DirectShow (good compatibility, may be slower)
     # MSMF: Media Foundation (faster, Windows 10+)
     # None: Let OpenCV choose
-    BACKEND = None  # Change to cv.CAP_MSMF for potentially better performance
+    # use BACKEND = None for Windows default and BACKEND = cv.CAP_V4L2 for Linux
+    if os.name == 'nt':  # Windows
+        BACKEND = None  # Change to cv.CAP_MSMF for potentially better performance
+    else:  # Linux/Mac
+        BACKEND = cv.CAP_V4L2
+    
+    # Headless mode (no display window) - useful for Raspberry Pi daemon mode
+    # When True, disables all cv.imshow() and display thread operations
+    # Enables running as a background service without X11/display server
+    HEADLESS = False
 
 
 # ==================== Movement Filter Configuration ====================

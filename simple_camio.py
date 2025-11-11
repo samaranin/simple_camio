@@ -347,16 +347,21 @@ def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
     return True
 
 
-def initialize_display(use_threaded):
+def initialize_display(use_threaded, headless=False):
     """
     Initialize display system (threaded or traditional).
     
     Args:
         use_threaded (bool): Whether to use threaded display
+        headless (bool): Whether to run in headless mode (no display)
         
     Returns:
         DisplayThread or None: Display thread if enabled, None otherwise
     """
+    if headless:
+        logger.info("Headless mode enabled - display disabled")
+        return None
+    
     if use_threaded:
         display_thread = DisplayThread(window_name='image reprojection')
         display_thread.start()
@@ -466,7 +471,7 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
 
 
 def handle_display_and_input(display_img, display_frame_counter, display_thread, 
-                             stop_event, frame, workers, components, prof_times, fps_state):
+                             stop_event, frame, workers, components, prof_times, fps_state, headless=False):
     """
     Handle frame display and keyboard input.
 
@@ -480,10 +485,16 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         components (dict): System components
         prof_times (dict): Performance timing dictionary
         fps_state (dict): FPS tracking state
+        headless (bool): Whether running in headless mode (no display)
         
     Returns:
         tuple: (should_continue, updated_counter, updated_fps_state)
     """
+    # Skip display and input handling if in headless mode
+    if headless:
+        # In headless mode, still check stop_event periodically
+        return True, display_frame_counter, fps_state
+    
     # Check if should display this frame
     display_frame_counter += 1
     should_display = (display_frame_counter >= CameraConfig.DISPLAY_FRAME_SKIP)
@@ -548,7 +559,7 @@ def update_performance_stats(frame_count, prof_start, prof_times, PROF_INTERVAL)
     return frame_count, prof_start, prof_times
 
 
-def run_main_loop(cap, components, workers, stop_event):
+def run_main_loop(cap, components, workers, stop_event, headless=False):
     """
     Main processing loop for the CamIO system.
 
@@ -557,6 +568,7 @@ def run_main_loop(cap, components, workers, stop_event):
         components (dict): System components
         workers (dict): Worker threads and queues
         stop_event: Event for shutdown coordination
+        headless (bool): Whether to run in headless mode (no display)
     """
     # Initialize state variables
     last_double_tap_ts = 0.0
@@ -577,7 +589,7 @@ def run_main_loop(cap, components, workers, stop_event):
         'display_fps': 0.0      # Actual display update rate
     }
 
-    logger.info("Starting main loop")
+    logger.info(f"Starting main loop (headless={headless})")
 
     # Performance profiling variables
     frame_count = 0
@@ -586,8 +598,8 @@ def run_main_loop(cap, components, workers, stop_event):
     PROF_INTERVAL = 15.0  # Log performance every 15 seconds
     display_frame_counter = 0  # Counter for frame skip
     
-    # Initialize display system
-    display_thread = initialize_display(CameraConfig.USE_THREADED_DISPLAY)
+    # Initialize display system (disabled in headless mode)
+    display_thread = initialize_display(CameraConfig.USE_THREADED_DISPLAY, headless=headless)
 
     # Play welcome message at startup and start with crickets
     workers['audio_worker'].enqueue_command(AudioCommand('play_welcome'))
@@ -633,7 +645,7 @@ def run_main_loop(cap, components, workers, stop_event):
         # Handle display and keyboard input
         should_continue, display_frame_counter, fps_state = handle_display_and_input(
             display_img, display_frame_counter, display_thread,
-            stop_event, frame, workers, components, prof_times, fps_state
+            stop_event, frame, workers, components, prof_times, fps_state, headless=headless
         )
         if not should_continue:
             break
@@ -777,7 +789,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='CamIO - Interactive Map System')
     parser.add_argument('--input1', help='Path to map configuration JSON file',
                        default='models/UkraineMap/UkraineMap.json')
+    parser.add_argument('--headless', action='store_true',
+                       help='Run in headless mode (no display window) - useful for Raspberry Pi daemon mode')
     args = parser.parse_args()
+
+    # Apply headless mode to configuration if specified
+    if args.headless:
+        CameraConfig.HEADLESS = True
+        logger.info("Headless mode enabled via command line argument")
 
     # Initialize system
     components = initialize_system(args.input1)
@@ -795,11 +814,14 @@ if __name__ == "__main__":
     rect_flash_remaining = 0
     timer = time.time() - 1
 
-    logger.info("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
+    if not CameraConfig.HEADLESS:
+        logger.info("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
+    else:
+        logger.info("Running in headless mode. Send SIGINT (Ctrl+C) or SIGTERM to stop.")
 
     # ==================== Main Loop ====================
     try:
-        run_main_loop(cap, components, workers, stop_event)
+        run_main_loop(cap, components, workers, stop_event, headless=CameraConfig.HEADLESS)
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, shutting down...")
         stop_event.set()

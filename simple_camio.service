@@ -1,0 +1,30 @@
+[Unit]
+Description=Simple CamIO - Interactive Tactile Map System
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/simple_camio
+Environment="DISPLAY=:0"
+Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse/"
+
+# Run in headless mode (no display window)
+ExecStart=/home/pi/simple_camio/venv/bin/python /home/pi/simple_camio/simple_camio.py --headless --input1 /home/pi/simple_camio/models/UkraineMap/UkraineMap.json
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=simple_camio
+
+# Security settings (optional, adjust as needed)
+# NoNewPrivileges=true
+# PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
