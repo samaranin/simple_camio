@@ -3,11 +3,29 @@ Audio playback components for Simple CamIO.
 
 This module handles all audio-related functionality including ambient sounds,
 sound effects, and zone-based audio descriptions.
+
+HEADLESS MODE SUPPORT:
+For Raspberry Pi or other headless systems without X11, Pyglet needs special configuration.
+The environment variable PYGLET_HEADLESS should be set before importing this module.
+Alternatively, set a dummy DISPLAY variable if audio device supports it.
 """
 
 import os
-import pyglet.media
 import logging
+
+# Configure Pyglet for headless operation before importing
+# This prevents Pyglet from trying to connect to X11 display
+if os.environ.get('DISPLAY') is None:
+    # No display available - try to use headless audio
+    # Set a dummy display to allow Pyglet audio to work
+    # This works on many systems where audio doesn't actually need X11
+    os.environ['DISPLAY'] = ':0'
+    logger = logging.getLogger(__name__)
+    logger.warning("No DISPLAY environment variable set. Audio playback may not work without X11.")
+    logger.info("For true headless operation, consider using ALSA or PulseAudio directly,")
+    logger.info("or run with 'xvfb-run python simple_camio.py --headless' to use virtual display")
+
+import pyglet.media
 
 logger = logging.getLogger(__name__)
 

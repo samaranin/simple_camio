@@ -2,6 +2,51 @@
 
 This guide explains how to run Simple CamIO in headless mode as a system daemon on Raspberry Pi or other Linux systems.
 
+## Important: Headless Audio Setup
+
+When running without X11 (no display server), Pyglet audio needs special configuration. Choose one of these methods:
+
+### Method 1: Using xvfb (Virtual Display - Recommended)
+
+Install xvfb (X virtual framebuffer):
+```bash
+sudo apt-get update
+sudo apt-get install -y xvfb
+```
+
+Run with xvfb:
+```bash
+xvfb-run python simple_camio.py --headless
+```
+
+### Method 2: Set DISPLAY Environment Variable
+
+If you have X11 running or PulseAudio configured:
+```bash
+export DISPLAY=:0
+python simple_camio.py --headless
+```
+
+### Method 3: Use PulseAudio (Best for Production)
+
+Ensure PulseAudio is running:
+```bash
+# Install PulseAudio if not present
+sudo apt-get install -y pulseaudio
+
+# Start PulseAudio for your user
+pulseaudio --start
+
+# Verify it's running
+pulseaudio --check && echo "PulseAudio is running"
+```
+
+Then run with DISPLAY set:
+```bash
+export DISPLAY=:0
+python simple_camio.py --headless
+```
+
 ## Headless Mode
 
 Simple CamIO now supports headless mode, which disables the display window and allows the application to run as a background service without requiring a display server (X11).
@@ -152,6 +197,36 @@ sudo systemctl disable simple_camio.service
 ```
 
 ### 6. Troubleshooting
+
+#### Pyglet Display Error (Cannot connect to "None")
+
+**Error message:**
+```
+pyglet.display.xlib.NoSuchDisplayException: Cannot connect to "None"
+```
+
+**Cause:** Pyglet is trying to connect to X11 display for audio, but no display is available.
+
+**Solution 1 - Use xvfb (Recommended):**
+```bash
+# Install xvfb
+sudo apt-get install -y xvfb
+
+# Run with xvfb
+xvfb-run python simple_camio.py --headless
+```
+
+**Solution 2 - Set DISPLAY environment variable:**
+```bash
+export DISPLAY=:0
+python simple_camio.py --headless
+```
+
+**Solution 3 - For systemd service:**
+The provided `simple_camio.service` file already includes `xvfb-run`. Make sure xvfb is installed:
+```bash
+sudo apt-get install -y xvfb
+```
 
 #### Camera Access Issues
 

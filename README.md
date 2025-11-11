@@ -58,8 +58,19 @@ python simple_camio.py --input1 models/UkraineMap/UkraineMap.json
 
 To run in headless mode (no display window, suitable for Raspberry Pi daemon):
 ```bash
+# Using helper script (automatically handles display setup)
+./run_headless.sh --map models/RivneMap/RivneMap.json
+
+# Or manually with xvfb
+xvfb-run python simple_camio.py --headless
+
+# Or with DISPLAY environment variable
+export DISPLAY=:0
 python simple_camio.py --headless
 ```
+
+**Note for Raspberry Pi:** Headless mode requires `xvfb` or a `DISPLAY` environment variable for audio support.
+Install with: `sudo apt-get install xvfb`
 
 See [RASPBERRY_PI_DAEMON.md](RASPBERRY_PI_DAEMON.md) for detailed instructions on running as a Linux daemon/service.
 
