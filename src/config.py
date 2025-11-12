@@ -280,8 +280,9 @@ class MediaPipeConfig:
 class AudioConfig:
     """Configuration for audio playback."""
 
-    # Ambient sound volume levels
-    HEARTBEAT_VOLUME = 0.05
+    # Ambient sound volume levels (0.0 to 1.0)
+    # 0.05 = 5%, 0.25 = 25%, 0.5 = 50%, 1.0 = 100%
+    HEARTBEAT_VOLUME = 0.25  # Increased from 0.05
     
     # Map description playback mode
     # If True: Play map description only once (first hand detection)
