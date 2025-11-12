@@ -70,8 +70,10 @@ def initialize_system(model_path):
         logger.error(f"Unknown model type: {model['modelType']}")
         raise ValueError(f"Unsupported model type: {model['modelType']}")
 
-    # Configure audio
+    # Configure audio volumes
     heartbeat_player.set_volume(AudioConfig.HEARTBEAT_VOLUME)
+    crickets_player.set_volume(AudioConfig.CRICKETS_VOLUME)
+    camio_player.set_zone_volume(AudioConfig.ZONE_DESCRIPTION_VOLUME)
     # Note: Welcome message will be played by AudioWorker after it starts
 
     logger.info("System initialization complete")

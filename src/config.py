@@ -281,8 +281,10 @@ class AudioConfig:
     """Configuration for audio playback."""
 
     # Ambient sound volume levels (0.0 to 1.0)
-    # 0.05 = 5%, 0.25 = 25%, 0.5 = 50%, 1.0 = 100%
-    HEARTBEAT_VOLUME = 1  # Increased from 0.05
+    # 0.05 = 5%, 0.10 = 10%, 0.25 = 25%, 0.5 = 50%, 1.0 = 100%
+    HEARTBEAT_VOLUME = 0.20  # Quiet ambient heartbeat
+    CRICKETS_VOLUME = 0.20   # Quiet ambient crickets
+    ZONE_DESCRIPTION_VOLUME = 1.0  # Full volume for location descriptions
     
     # Map description playback mode
     # If True: Play map description only once (first hand detection)

@@ -243,6 +243,36 @@ class ZoneAudioPlayer:
             else:
                 logger.warning(f"Audio file not found: {hotspot['audioDescription']}")
 
+    def set_zone_volume(self, volume):
+        """
+        Set the volume for zone audio playback (descriptions, welcome, goodbye).
+        
+        Args:
+            volume (float): Volume level between 0.0 and 1.0
+        """
+        if not 0 <= volume <= 1:
+            logger.warning(f"Invalid volume {volume}, must be between 0.0 and 1.0")
+            return
+            
+        # Note: For pygame, volumes are set per-sound when playing
+        # For pyglet, we'll store the volume to apply when playing
+        self.zone_volume = volume
+        
+        # Set volume for all loaded zone sounds
+        if USE_PYGAME:
+            if self.blip_sound:
+                self.blip_sound.set_volume(volume * 0.3)  # Blips quieter than descriptions
+            if hasattr(self, 'map_description') and self.map_description:
+                self.map_description.set_volume(volume)
+            if self.welcome_message:
+                self.welcome_message.set_volume(volume)
+            if self.goodbye_message:
+                self.goodbye_message.set_volume(volume)
+            for sound in self.sound_files.values():
+                sound.set_volume(volume)
+        
+        logger.debug(f"Set zone audio volume to {volume}")
+
     def play_description(self):
         """Play the map description audio (only once)."""
         if not self.have_played_description:
