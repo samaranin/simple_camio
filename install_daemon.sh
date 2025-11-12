@@ -72,15 +72,18 @@ sed -e "s|/home/pi|/home/${ACTUAL_USER}|g" \
     -e "s|Group=pi|Group=${ACTUAL_USER}|g" \
     "$SERVICE_FILE" > "$TEMP_SERVICE"
 
-echo "Step 2: Installing service file..."
+echo "Step 2: Unmasking service (if previously masked)..."
+systemctl unmask simple_camio.service 2>/dev/null || true
+
+echo "Step 3: Installing service file..."
 cp "$TEMP_SERVICE" /etc/systemd/system/simple_camio.service
 chmod 644 /etc/systemd/system/simple_camio.service
 rm "$TEMP_SERVICE"
 
-echo "Step 3: Reloading systemd daemon..."
+echo "Step 4: Reloading systemd daemon..."
 systemctl daemon-reload
 
-echo "Step 4: Enabling service for auto-start..."
+echo "Step 5: Enabling service for auto-start on boot..."
 systemctl enable simple_camio.service
 
 echo ""
