@@ -282,8 +282,8 @@ class AudioConfig:
 
     # Ambient sound volume levels (0.0 to 1.0)
     # 0.05 = 5%, 0.10 = 10%, 0.25 = 25%, 0.5 = 50%, 1.0 = 100%
-    HEARTBEAT_VOLUME = 0.20  # Quiet ambient heartbeat
-    CRICKETS_VOLUME = 0.20   # Quiet ambient crickets
+    HEARTBEAT_VOLUME = 0.05  # White noise when hand detected (very quiet)
+    CRICKETS_VOLUME = 0.20   # Ambient crickets (quiet)
     ZONE_DESCRIPTION_VOLUME = 1.0  # Full volume for location descriptions
     
     # Map description playback mode
