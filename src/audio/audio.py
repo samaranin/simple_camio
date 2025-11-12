@@ -120,9 +120,11 @@ class AmbientSoundPlayer:
                 logger.debug("Started pyglet ambient sound playback")
         elif USE_PYGAME and self.sound:
             if not self._playing:
+                # Set volume before playing (pygame requirement)
+                self.sound.set_volume(self.volume)
                 self.sound.play(loops=-1)  # -1 means loop forever
                 self._playing = True
-                logger.debug("Started pygame ambient sound playback")
+                logger.debug(f"Started pygame ambient sound playback at volume {self.volume}")
 
     def pause_sound(self):
         """Pause the ambient sound if currently playing."""
