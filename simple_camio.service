@@ -4,9 +4,9 @@ After=network.target sound.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/simple_camio
+User=user
+Group=user
+WorkingDirectory=/home/user/simple_camio
 
 # Environment variables for headless operation
 # DISPLAY required for Pyglet audio (even without actual display)
@@ -16,10 +16,10 @@ Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse/"
 # Run in headless mode (no display window)
 # Using xvfb-run for virtual display support (recommended)
 # Install with: sudo apt-get install xvfb
-ExecStart=/usr/bin/xvfb-run -a /home/pi/simple_camio/venv/bin/python /home/pi/simple_camio/simple_camio.py --headless --input1 /home/pi/simple_camio/models/UkraineMap/UkraineMap.json
+ExecStart=/usr/bin/xvfb-run -a /home/user/simple_camio/venv/bin/python /home/user/simple_camio/simple_camio.py --headless --input1 /home/user/simple_camio/models/CnapMap/CnapFirstFloor.json
 
 # Alternative without xvfb (if DISPLAY and audio work):
-# ExecStart=/home/pi/simple_camio/venv/bin/python /home/pi/simple_camio/simple_camio.py --headless --input1 /home/pi/simple_camio/models/UkraineMap/UkraineMap.json
+# ExecStart=/home/user/simple_camio/venv/bin/python /home/user/simple_camio/simple_camio.py --headless --input1 /home/user/simple_camio/models/CnapMap/CnapFirstFloor.json
 
 # Restart on failure
 Restart=on-failure
