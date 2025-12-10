@@ -1,221 +1,831 @@
-import os
+"""
+Simple CamIO - Interactive Map System with Hand Tracking.
+
+This is the main entry point for the CamIO system, which uses hand tracking
+and gesture recognition to enable interactive exploration of physical maps.
+"""
+
 import cv2 as cv
-import datetime
 import time
-import numpy as np
-import pickle
 import argparse
-import pyglet.media
-from scipy import stats
-from map_parameters import *
+import pyglet
+import queue
+import threading
+import signal
+import logging
+import numpy as np  # moved to top to avoid per-call imports
+
+# Import from new modular structure
+from src.config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetectionConfig
+from src.core.utils import select_camera_port, load_map_parameters, is_gesture_valid
+from src.audio.audio import AmbientSoundPlayer, ZoneAudioPlayer
+from src.detection.gesture_detection import GestureDetector, MovementMedianFilter
+from src.detection.pose_detector import CombinedPoseDetector
+from src.detection.sift_detector import SIFTModelDetectorMP
+from src.core.interaction_policy import InteractionPolicy2D
+from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
+from src.core.display_thread import DisplayThread
+from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Reusable identity homography to avoid per-frame allocations
+IDENTITY_3 = np.eye(3, dtype=float)
 
 
+def initialize_system(model_path):
+    """
+    Initialize all system components.
 
-# Function to sort corners by id based on how they are arranged
-def sort_corners_by_id(corners, id, scene):
-    use_index = np.zeros(16, dtype=bool)
-    for i in range(len(corners)):
-        corner_num = ids[i, 0]
-        if corner_num < 4:
-            for j in range(4):
-                use_index[4 * corner_num + j] = True
-                scene[4 * corner_num + j, :] = corners[i][0][j]
-    return scene, use_index
+    Args:
+        model_path (str): Path to the map configuration JSON file
 
+    Returns:
+        dict: Dictionary containing all initialized components
+    """
+    logger.info("Initializing CamIO system...")
 
-# Function to reverse the projection of a point given a rvec and tvec
-def reverse_project(point, rvec, tvec):
-    poi = np.matrix(point)
-    R, _ = cv.Rodrigues(rvec)
-    R_mat = np.matrix(R)
-    R_inv = np.linalg.inv(R_mat)
-    T = np.matrix(tvec)
-    return np.array(R_inv * (poi - T))
+    # Load map configuration
+    model = load_map_parameters(model_path)
 
+    # Select camera
+    cam_port = select_camera_port()
 
-# Function to create 3D points from 2D pixels on a sheet of paper
-def get_3d_points_from_pixels(obj_pts, pixels_per_cm):
-    pts_3d = np.empty((len(obj_pts), 3), dtype=np.float32)
-    for i in range(len(obj_pts)):
-        pts_3d[i, 0] = obj_pts[i, 0] / pixels_per_cm
-        pts_3d[i, 1] = obj_pts[i, 1] / pixels_per_cm
-        pts_3d[i, 2] = 0
-    return pts_3d
-
-
-# Draws the axes on the image
-def drawAxes(img, imgpts):
-    imgpts = imgpts.astype(int)
-    corner = tuple(imgpts[3].ravel())
-    img = cv.line(img, corner, tuple(imgpts[0].ravel()), (255, 0, 0), 5)
-    img = cv.line(img, corner, tuple(imgpts[1].ravel()), (0, 255, 0), 5)
-    img = cv.line(img, corner, tuple(imgpts[2].ravel()), (0, 0, 255), 5)
-    return img
-
-
-# Retrieves the zone of the point of interest on the map
-def get_zone(point_of_interest, img_map, pixels_per_cm):
-    x = int(point_of_interest[0] * pixels_per_cm)
-    y = int(point_of_interest[1] * pixels_per_cm)
-    if 0 <= x < img_map.shape[1] and 0 <= y < img_map.shape[0]:
-        return img_map[y, x]
+    # Initialize components based on model type
+    if model["modelType"] == "sift_2d_mediapipe":
+        model_detector = SIFTModelDetectorMP(model)
+        pose_detector = CombinedPoseDetector(model)
+        gesture_detector = GestureDetector()
+        motion_filter = MovementMedianFilter()
+        interact = InteractionPolicy2D(model)
+        camio_player = ZoneAudioPlayer(model)
+        crickets_player = AmbientSoundPlayer(model['crickets'])
+        heartbeat_player = AmbientSoundPlayer(model['heartbeat'])
     else:
-        return 0
+        logger.error(f"Unknown model type: {model['modelType']}")
+        raise ValueError(f"Unsupported model type: {model['modelType']}")
 
-#========================================
-pixels_per_cm_obj = 118.49  # text-with-aruco.png
-focal_length_x = 1.88842395e+03
-focal_length_y = 1.89329463e+03
-camera_center_x = 9.21949329e+02
-camera_center_y = 3.34464319e+02
-distortion = np.array([0.09353041, -0.12232207, 0.00182885, -0.00131933, -0.30184632], dtype=np.float32) * 0
-use_external_cam = 0
-#========================================
+    # Configure audio volumes
+    heartbeat_player.set_volume(AudioConfig.HEARTBEAT_VOLUME)
+    crickets_player.set_volume(AudioConfig.CRICKETS_VOLUME)
+    camio_player.set_zone_volume(AudioConfig.ZONE_DESCRIPTION_VOLUME)
+    # Note: Welcome message will be played by AudioWorker after it starts
 
-parser = argparse.ArgumentParser(description='Code for CamIO.')
-parser.add_argument('--input1', help='Path to input zone image.', default='zone_map.png')
-args = parser.parse_args()
+    logger.info("System initialization complete")
 
-if os.path.isfile('camera_parameters.pkl'):
-    with open('camera_parameters.pkl', 'rb') as f:
-        focal_length_x, focal_length_y, camera_center_x, camera_center_y = pickle.load(f)
-        print("loaded camera parameters from file.")
+    return {
+        'model': model,
+        'cam_port': cam_port,
+        'model_detector': model_detector,
+        'pose_detector': pose_detector,
+        'gesture_detector': gesture_detector,
+        'motion_filter': motion_filter,
+        'interact': interact,
+        'camio_player': camio_player,
+        'crickets_player': crickets_player,
+        'heartbeat_player': heartbeat_player
+    }
 
-intrinsic_matrix = np.array([[focal_length_x, 0.00000000e+00, camera_center_x],
-                             [0.00000000e+00, focal_length_y, camera_center_y],
-                             [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]], dtype=np.float32)
-# intrinsic_matrix = np.transpose(np.array([[1469.8549, 0.0, 0.0], [0.0, 1469.8549, 0.0], [964.5927, 718.271, 1.0]], dtype=np.float32))
 
-# Zone filter logic
-prev_zone_name = None
-zone_filter_size = 10
-zone_filter = np.zeros(zone_filter_size, dtype=int)
-zone_filter_cnt = 0
+def create_worker_threads(components, stop_event):
+    """
+    Create and start background worker threads.
 
-# Load color image
-img_map_color = cv.imread(args.input1, cv.IMREAD_COLOR)  # Image.open(cv.samples.findFile(args.input1))
-img_map = cv.cvtColor(img_map_color, cv.COLOR_BGR2GRAY)
+    Args:
+        components (dict): Dictionary of system components
+        stop_event (threading.Event): Event for coordinated shutdown
 
-scene = np.empty((16, 2), dtype=np.float32)
-player = pyglet.media.Player()
-cap = cv.VideoCapture(use_external_cam)
-start_time = time.time()
-cap.set(cv.CAP_PROP_FRAME_HEIGHT,1080) #set camera image height
-cap.set(cv.CAP_PROP_FRAME_WIDTH,1920) #set camera image width
-cap.set(cv.CAP_PROP_FOCUS,0)
+    Returns:
+        dict: Dictionary containing workers and synchronization objects
+    """
+    logger.info("Creating worker threads...")
 
-# Main loop
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        print("No camera image returned.")
-        break
+    # Create queues
+    pose_queue = queue.Queue(maxsize=WorkerConfig.POSE_QUEUE_MAXSIZE)
+    sift_queue = queue.Queue(maxsize=WorkerConfig.SIFT_QUEUE_MAXSIZE)
+    lock = threading.Lock()
 
-    img_scene_color = frame
+    # Create workers
+    pose_worker = PoseWorker(
+        components['pose_detector'],
+        pose_queue,
+        lock,
+        processing_scale=CameraConfig.POSE_PROCESSING_SCALE,
+        stop_event=stop_event
+    )
 
-    # load images grayscale
-    img_scene = cv.cvtColor(img_scene_color, cv.COLOR_BGR2GRAY)
+    sift_worker = SIFTWorker(
+        components['model_detector'],
+        sift_queue,
+        lock,
+        stop_event=stop_event
+    )
 
-    # Define aruco marker dictionary and parameters object to include subpixel resolution
-    aruco_dict = cv.aruco.Dictionary_get(cv.aruco.DICT_4X4_50)
-    arucoParams = cv.aruco.DetectorParameters_create()
-    arucoParams.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX
-    # Detect aruco markers in image
-    (corners, ids, rejected) = cv.aruco.detectMarkers(img_scene, aruco_dict, parameters=arucoParams)
-    scene, use_index = sort_corners_by_id(corners, id, scene)
+    # Create audio worker for non-blocking audio playback
+    audio_worker = AudioWorker(
+        components['camio_player'],
+        components['heartbeat_player'],
+        components['crickets_player'],
+        stop_event
+    )
 
-    if ids is None or not any(use_index):
-        print("No markers found.")
-        cv.imshow('image reprojection', img_scene_color)
-        waitkey = cv.waitKey(1)
-        if waitkey == 27:
-            print('Escape.')
-            cap.release()
-            cv.destroyAllWindows()
-            break
-        continue
+    # Start workers
+    pose_worker.start()
+    sift_worker.start()
+    audio_worker.start()
 
-    # Run solvePnP using the markers that have been observed
-    retval, rvec, tvec = cv.solvePnP(obj[use_index, :], scene[use_index, :], intrinsic_matrix, None)
+    logger.info("Worker threads started")
 
-    # Draw axes on the image
-    axis = np.float32([[6, 0, 0], [0, 6, 0], [0, 0, -6], [0, 0, 0]]).reshape(-1, 3)
-    axis_pts, other = cv.projectPoints(axis, rvec, tvec, intrinsic_matrix, None)
-    img_scene_color = drawAxes(img_scene_color, axis_pts)
+    return {
+        'pose_queue': pose_queue,
+        'sift_queue': sift_queue,
+        'lock': lock,
+        'pose_worker': pose_worker,
+        'sift_worker': sift_worker,
+        'audio_worker': audio_worker
+    }
 
-    # Draw circles on the backprojected corner points
-    backprojection_pts, other = cv.projectPoints(obj, rvec, tvec, intrinsic_matrix, None)
-    for idx, pts in enumerate(backprojection_pts):
-        cv.circle(img_scene_color, (int(pts[0, 0]), int(pts[0, 1])), 4, (255, 255, 255), 2)
-        cv.line(img_scene_color, (int(pts[0, 0] - 1), int(pts[0, 1])), (int(pts[0, 0]) + 1, int(pts[0, 1])),
-                (255, 0, 0), 1)
-        cv.line(img_scene_color, (int(pts[0, 0]), int(pts[0, 1]) - 1), (int(pts[0, 0]), int(pts[0, 1]) + 1),
-                (255, 0, 0), 1)
-        # cv.line(img_scene_color, (int(pts[0,0]), int(pts[0,1])), (int(scene[idx,0]), int(scene[idx,1])), (0, 255, 0), 1)
 
-    # Set up aruco detection for the pointer marker
-    aruco_dict = cv.aruco.Dictionary_get(cv.aruco.DICT_5X5_50)
-    dp = cv.aruco.DetectorParameters_create()
-    dp.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX
+def setup_signal_handler(stop_event):
+    """
+    Setup signal handler for graceful shutdown.
 
-    corners, ids, _ = cv.aruco.detectMarkers(img_scene, aruco_dict, parameters=dp)
-    obj_aruco = np.empty((4, 3), dtype=np.float32)
-    scene_aruco = np.empty((4, 2), dtype=np.float32)
+    Args:
+        stop_event (threading.Event): Event to signal on interrupt
+    """
+    def signal_handler(sig, frame):
+        logger.info("Signal received, shutting down...")
+        stop_event.set()
 
-    # if we are just using 1 large marker
-    obj_aruco[0, :] = [0.5, 0.5, 0]
-    obj_aruco[1, :] = [3.5, 0.5, 0]
-    obj_aruco[2, :] = [3.5, 3.5, 0]
-    obj_aruco[3, :] = [0.5, 3.5, 0]
+    signal.signal(signal.SIGINT, signal_handler)
 
-    if len(corners) > 0:
-        for i in range(4):
-            scene_aruco[i, :] = corners[0][0][i]
-            cv.circle(img_scene_color, (int(scene_aruco[i, 0]), int(scene_aruco[i, 1])), 3, (255, 255, 255), 2)
 
-    retval, rvec_aruco, tvec_aruco = cv.solvePnP(obj_aruco, scene_aruco, intrinsic_matrix, distortion)
-    # Backproject pointer tip and draw it on the image
-    backprojection_pt, other = cv.projectPoints(np.array([0, 0, 0], dtype=np.float32).reshape(1, 3), rvec_aruco,
-                                                tvec_aruco, intrinsic_matrix, distortion)
-    if len(corners) > 0:
-        cv.circle(img_scene_color, (int(backprojection_pt[0, 0, 0]), int(backprojection_pt[0, 0, 1])), 2, (0, 255, 0), 2)
+def feed_worker_queues(frame, gray, workers, model_detector):
+    """
+    Feed frames to worker queues for background processing.
 
-    # Get pointer location in coordinates of the aruco markers
-    point_of_interest = reverse_project(tvec_aruco, rvec, tvec)
+    Args:
+        frame: Color camera frame
+        gray: Grayscale camera frame
+        workers (dict): Worker threads and queues
+        model_detector: SIFT detector instance
+    """
+    # Feed SIFT worker (always use latest frame, drop old ones)
+    try:
+        workers['sift_queue'].put_nowait(gray)
+    except queue.Full:
+        try:
+            _ = workers['sift_queue'].get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            workers['sift_queue'].put_nowait(gray)
+        except queue.Full:
+            pass
 
-    # Filter the zones by returning the mode of the last [zone_filter_size] zones
-    zone_filter[zone_filter_cnt] = get_zone(point_of_interest, img_map, pixels_per_cm_obj)
-    zone_filter_cnt = (zone_filter_cnt + 1) % zone_filter_size
-    zone = stats.mode(zone_filter).mode[0]
+    # Feed pose worker with frame and current homography
+    H_current = model_detector.H if model_detector.H is not None else IDENTITY_3
+    try:
+        workers['pose_queue'].put_nowait((frame, H_current))
+    except queue.Full:
+        try:
+            _ = workers['pose_queue'].get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            workers['pose_queue'].put_nowait((frame, H_current))
+        except queue.Full:
+            pass
 
-    # Check if the Z position is within the threshold, if so, play a sound
-    Z_threshold_cm = 2.0
-    if np.abs(point_of_interest[2]) < Z_threshold_cm:
-        zone_name = map_dict_ukraine.get(zone, None)
-        if zone_name:
-            if prev_zone_name != zone_name:
-                soundfile = './MP3/' + sound_dict_ukraine.get(zone, None)
-                if os.path.exists(soundfile) and time.time() - start_time > 0.5:
-                    sound = pyglet.media.load(soundfile, streaming=False)
-                    # player.next_source()
-                    # player.queue(sound)
-                    # player.play()
-                    sound.play()
-                    start_time = time.time()
-                    #playsound(soundfile, block=False)
-            prev_zone_name = zone_name
-            print(zone_name)
+
+def process_gestures_and_audio(gesture_loc, gesture_status, components,
+                               last_double_tap_ts, audio_worker, hand_state):
+    """
+    Process detected gestures and trigger appropriate audio feedback.
+
+    Args:
+        gesture_loc: Detected gesture location
+        gesture_status: Status of the gesture
+        components (dict): System components
+        last_double_tap_ts (float): Timestamp of last double-tap
+        audio_worker (AudioWorker): Audio worker for non-blocking playback
+        hand_state (dict): Hand detection state tracking
+
+    Returns:
+        tuple: (updated_last_double_tap_ts, updated_hand_state)
+    """
+    # Cooldown should be longer than zone filter stabilization time
+    # Zone filter uses 10 samples at ~30-60fps = ~0.3s to stabilize
+    ZONE_AUDIO_COOLDOWN = 0.8  # Increased to ensure filter stabilizes before playing audio
+    
+    if not is_gesture_valid(gesture_loc):
+        # No hand detected - switch to crickets
+        if hand_state['was_detected']:
+            audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
+            audio_worker.enqueue_command(AudioCommand('crickets_play'))
+        
+        # Reset hand state
+        hand_state['was_detected'] = False
+        hand_state['first_detected_ts'] = 0.0
+        return last_double_tap_ts, hand_state
+
+    # Hand detected
+    if not hand_state['was_detected']:
+        # Hand just appeared - pause crickets, play map description, start heartbeat
+        audio_worker.enqueue_command(AudioCommand('crickets_pause'))
+        
+        # Play map description based on config
+        if AudioConfig.PLAY_DESCRIPTION_ONCE:
+            if not hand_state['description_played']:
+                audio_worker.enqueue_command(AudioCommand('play_description'))
+                hand_state['description_played'] = True
         else:
-            prev_zone_name = None
-    # print(point_of_interest)#, dist, current_region)
+            # Play every time hand appears (supports multiple users)
+            audio_worker.enqueue_command(AudioCommand('play_description'))
+        
+        audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
+        
+        # Reset zone filter to ensure clean tracking from start
+        components['interact'].reset_zone_filter()
+        
+        # Update zone tracking and set prev_zone_name to prevent zone audio on first appearance
+        zone_id = components['interact'].push_gesture(gesture_loc)
+        if zone_id in components['camio_player'].hotspots:
+            components['camio_player'].prev_zone_name = components['camio_player'].hotspots[zone_id]['textDescription']
+        else:
+            components['camio_player'].prev_zone_name = None
+        
+        # Update hand state
+        hand_state['was_detected'] = True
+        hand_state['first_detected_ts'] = time.time()
+        
+        return last_double_tap_ts, hand_state
 
-    now = datetime.datetime.now()
-    cv.imshow('image reprojection', img_scene_color)
-    waitkey = cv.waitKey(1)
-    if waitkey == ord('s'):
-        cv.imwrite(f'{now.strftime("%Y.%m.%d.%H.%M.%S")}_backproject.jpg', img_scene_color)
-    if waitkey == 27:#Escape key
-        print('Escape.')
-        cap.release()
-        cv.destroyAllWindows()
-        break
+    # Check if we're still in the cooldown period after hand first appeared
+    time_since_first_detection = time.time() - hand_state['first_detected_ts'] if hand_state['first_detected_ts'] > 0 else 999
+    in_cooldown = time_since_first_detection < ZONE_AUDIO_COOLDOWN
+
+    # Handle double-tap
+    if gesture_status == 'double_tap':
+        now = time.time()
+        if now - last_double_tap_ts > TapDetectionConfig.DOUBLE_TAP_COOLDOWN_MAIN:
+            try:
+                zone_id = components['interact'].push_gesture(gesture_loc)
+                audio_worker.enqueue_command(
+                    AudioCommand('play_zone', zone_id=zone_id, gesture_status='double_tap')
+                )
+                last_double_tap_ts = now
+                logger.info(f"Double-tap processed for zone {zone_id}")
+            except Exception as e:
+                logger.error(f"Error handling double_tap: {e}")
+    elif not in_cooldown:
+        # Normal gesture processing (only if not in cooldown)
+        zone_id = components['interact'].push_gesture(gesture_loc)
+        audio_worker.enqueue_command(
+            AudioCommand('play_zone', zone_id=zone_id, gesture_status=gesture_status)
+        )
+    else:
+        # In cooldown - update zone tracking but don't play audio
+        zone_id = components['interact'].push_gesture(gesture_loc)
+        # Also update prev_zone_name to track current zone during cooldown
+        # This prevents audio from playing when cooldown expires
+        if zone_id in components['camio_player'].hotspots:
+            components['camio_player'].prev_zone_name = components['camio_player'].hotspots[zone_id]['textDescription']
+
+    return last_double_tap_ts, hand_state
+
+
+def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+    """
+    Handle keyboard input for user controls.
+
+    Args:
+        waitkey: Key code from cv.waitKey()
+        stop_event: Event for shutdown signaling
+        frame: Current camera frame
+        workers (dict): Worker threads and queues
+        components (dict): System components
+
+    Returns:
+        bool: True if should continue, False if should exit
+    """
+    # Quit
+    if waitkey == 27 or waitkey == ord('q'):
+        logger.info('Exiting...')
+        stop_event.set()
+        return False
+
+    # Manual re-detection
+    if waitkey == ord('h'):
+        logger.info("Manual re-detection triggered by user")
+        gray_now = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        components['model_detector'].requires_homography = True
+        components['model_detector'].last_rect_pts = None
+
+        # Force feed the frame to SIFT worker
+        for _ in range(3):
+            try:
+                workers['sift_queue'].put_nowait(gray_now)
+            except queue.Full:
+                try:
+                    _ = workers['sift_queue'].get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    workers['sift_queue'].put_nowait(gray_now)
+                except queue.Full:
+                    pass
+        workers['sift_worker'].trigger_redetect()
+
+    # Toggle blips
+    if waitkey == ord('b'):
+        workers['audio_worker'].enqueue_command(AudioCommand('toggle_blips'))
+
+    return True
+
+
+def initialize_display(use_threaded, headless=False):
+    """
+    Initialize display system (threaded or traditional).
+    
+    Args:
+        use_threaded (bool): Whether to use threaded display
+        headless (bool): Whether to run in headless mode (no display)
+        
+    Returns:
+        DisplayThread or None: Display thread if enabled, None otherwise
+    """
+    if headless:
+        logger.info("Headless mode enabled - display disabled")
+        return None
+    
+    if use_threaded:
+        display_thread = DisplayThread(window_name='image reprojection')
+        display_thread.start()
+        logger.info("DisplayThread enabled for non-blocking rendering")
+        return display_thread
+    else:
+        # Create window for non-threaded display
+        cv.namedWindow('image reprojection', cv.WINDOW_NORMAL)
+        return None
+
+
+def capture_and_preprocess(cap, prof_times):
+    """
+    Capture frame from camera and convert to grayscale.
+    
+    Args:
+        cap: Camera capture object
+        prof_times (dict): Performance timing dictionary
+        
+    Returns:
+        tuple: (success, frame, gray) or (False, None, None) on error
+    """
+    frame_start = time.time()
+    ret, frame = cap.read()
+    prof_times['capture'] += time.time() - frame_start
+    
+    if not ret:
+        logger.error("No camera image returned")
+        return False, None, None
+    
+    # Convert to grayscale for SIFT
+    t = time.time()
+    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    prof_times['gray'] += time.time() - t
+    
+    return True, frame, gray
+
+
+def get_pose_results(workers, prof_times):
+    """
+    Get latest pose detection results from worker thread.
+    
+    Args:
+        workers (dict): Worker threads and queues
+        prof_times (dict): Performance timing dictionary
+        
+    Returns:
+        tuple: (gesture_loc, gesture_status, annotated_frame)
+    """
+    t = time.time()
+    with workers['lock']:
+        gesture_loc, gesture_status, annotated = workers['pose_worker'].latest
+    prof_times['lock'] += time.time() - t
+    return gesture_loc, gesture_status, annotated
+
+
+def process_map_detection(components, workers, display_img, rect_flash_remaining, 
+                          gesture_loc, gesture_status, last_double_tap_ts, prof_times,
+                          hand_state):
+    """
+    Process map detection status and handle gestures/audio.
+    
+    Args:
+        components (dict): System components
+        workers (dict): Worker threads
+        display_img: Current display image
+        rect_flash_remaining (int): Flash counter for rectangle
+        gesture_loc: Current gesture location
+        gesture_status: Current gesture status
+        last_double_tap_ts (float): Last double-tap timestamp
+        prof_times (dict): Performance timing dictionary
+        hand_state (dict): Hand detection state tracking
+        
+    Returns:
+        tuple: (updated_display_img, rect_flash_remaining, last_double_tap_ts, updated_hand_state)
+    """
+    t = time.time()
+    
+    if components['model_detector'].H is None:
+        # Map not detected - play ambient crickets
+        if hand_state['was_detected']:
+            workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
+            workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
+        hand_state['was_detected'] = False
+        hand_state['first_detected_ts'] = 0.0
+    else:
+        # Map detected - increment age counter
+        try:
+            components['model_detector'].frames_since_last_detection += 1
+        except Exception:
+            components['model_detector'].frames_since_last_detection = 1
+
+        # Draw tracking rectangle
+        display_img, rect_flash_remaining = draw_map_tracking(
+            display_img, components['model_detector'],
+            components['interact'], rect_flash_remaining
+        )
+
+        # Process gestures and audio
+        last_double_tap_ts, hand_state = process_gestures_and_audio(
+            gesture_loc, gesture_status, components, last_double_tap_ts,
+            workers['audio_worker'], hand_state
+        )
+    
+    prof_times['draw'] += time.time() - t
+    return display_img, rect_flash_remaining, last_double_tap_ts, hand_state
+
+
+def handle_display_and_input(display_img, display_frame_counter, display_thread, 
+                             stop_event, frame, workers, components, prof_times, fps_state, headless=False):
+    """
+    Handle frame display and keyboard input.
+
+    Args:
+        display_img: Image to display
+        display_frame_counter (int): Frame skip counter
+        display_thread: DisplayThread or None
+        stop_event: Event for shutdown coordination
+        frame: Current camera frame
+        workers (dict): Worker threads
+        components (dict): System components
+        prof_times (dict): Performance timing dictionary
+        fps_state (dict): FPS tracking state
+        headless (bool): Whether running in headless mode (no display)
+        
+    Returns:
+        tuple: (should_continue, updated_counter, updated_fps_state)
+    """
+    # Skip display and input handling if in headless mode
+    if headless:
+        # In headless mode, still check stop_event periodically
+        return True, display_frame_counter, fps_state
+    
+    # Check if should display this frame
+    display_frame_counter += 1
+    should_display = (display_frame_counter >= CameraConfig.DISPLAY_FRAME_SKIP)
+    if should_display:
+        display_frame_counter = 0
+    
+    # Display frame (threaded or direct)
+    t = time.time()
+    if CameraConfig.USE_THREADED_DISPLAY:
+        # Non-blocking display via thread
+        if should_display and display_thread:
+            display_thread.show(display_img)
+        # ALWAYS check keyboard input (critical for 'q' to work reliably)
+        waitkey = display_thread.get_last_key() if display_thread else 255
+    else:
+        # Blocking display (traditional)
+        if should_display:
+            cv.imshow('image reprojection', display_img)
+            waitkey = cv.waitKey(1) & 0xFF
+        else:
+            # Still need to call waitKey to process window events
+            waitkey = cv.waitKey(1) & 0xFF
+    prof_times['show'] += time.time() - t
+    
+    # Handle keyboard input
+    t = time.time()
+    should_continue = True
+    if waitkey != 255:  # 255 means no key pressed
+        if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+            should_continue = False
+    prof_times['key'] += time.time() - t
+    
+    return should_continue, display_frame_counter, fps_state
+def update_performance_stats(frame_count, prof_start, prof_times, PROF_INTERVAL):
+    """
+    Update and log performance statistics.
+    
+    Args:
+        frame_count (int): Number of frames processed
+        prof_start (float): Start time of profiling period
+        prof_times (dict): Performance timing dictionary
+        PROF_INTERVAL (float): Profiling interval in seconds
+        
+    Returns:
+        tuple: (updated_frame_count, updated_prof_start, updated_prof_times)
+    """
+    frame_count += 1
+    elapsed = time.time() - prof_start
+    
+    if elapsed >= PROF_INTERVAL:
+        fps = frame_count / elapsed
+        logger.info(f"=== Performance (last {frame_count} frames, {elapsed:.1f}s, {fps:.1f} FPS) ===")
+        for key, val in prof_times.items():
+            pct = 100 * val / elapsed
+            logger.info(f"  {key:10s}: {val*1000:.1f}ms ({pct:.1f}%)")
+        
+        # Reset counters
+        frame_count = 0
+        prof_start = time.time()
+        prof_times = {k: 0 for k in prof_times}
+    
+    return frame_count, prof_start, prof_times
+
+
+def run_main_loop(cap, components, workers, stop_event, headless=False):
+    """
+    Main processing loop for the CamIO system.
+
+    Args:
+        cap: Camera capture object
+        components (dict): System components
+        workers (dict): Worker threads and queues
+        stop_event: Event for shutdown coordination
+        headless (bool): Whether to run in headless mode (no display)
+    """
+    # Initialize state variables
+    last_double_tap_ts = 0.0
+    rect_flash_remaining = 0
+    timer = time.time() - 1
+    
+    # Hand detection state (consolidated into one dict)
+    hand_state = {
+        'was_detected': False,         # Whether hand was detected in previous frame
+        'description_played': False,   # Whether map description has been played once
+        'first_detected_ts': 0.0       # Timestamp when hand was first detected (for cooldown)
+    }
+    
+    # FPS tracking state
+    fps_state = {
+        'display_count': 0,     # Counts only displayed frames
+        'start_time': time.time(),
+        'display_fps': 0.0      # Actual display update rate
+    }
+
+    logger.info(f"Starting main loop (headless={headless})")
+
+    # Performance profiling variables
+    frame_count = 0
+    prof_start = time.time()
+    prof_times = {'capture': 0, 'gray': 0, 'feed': 0, 'lock': 0, 'draw': 0, 'ui': 0, 'show': 0, 'key': 0, 'pyglet': 0}
+    PROF_INTERVAL = 15.0  # Log performance every 15 seconds
+    display_frame_counter = 0  # Counter for frame skip
+    
+    # Initialize display system (disabled in headless mode)
+    display_thread = initialize_display(CameraConfig.USE_THREADED_DISPLAY, headless=headless)
+
+    # Play welcome message at startup and start with crickets
+    workers['audio_worker'].enqueue_command(AudioCommand('play_welcome'))
+    workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
+
+    # Main processing loop
+    while cap.isOpened() and not stop_event.is_set():
+        # Capture and preprocess frame
+        success, frame, gray = capture_and_preprocess(cap, prof_times)
+        if not success:
+            break
+        
+        # Early exit check for responsiveness
+        if stop_event.is_set():
+            break
+
+        # Feed worker queues
+        t = time.time()
+        feed_worker_queues(frame, gray, workers, components['model_detector'])
+        prof_times['feed'] += time.time() - t
+
+        # Get latest pose detection results
+        gesture_loc, gesture_status, annotated = get_pose_results(workers, prof_times)
+        display_img = frame if annotated is None else annotated
+
+        # Check for homography update (triggers flash)
+        if getattr(components['model_detector'], 'homography_updated', False):
+            rect_flash_remaining = UIConfig.RECT_FLASH_FRAMES
+            components['model_detector'].homography_updated = False
+
+        # Process map detection and gestures
+        display_img, rect_flash_remaining, last_double_tap_ts, hand_state = process_map_detection(
+            components, workers, display_img, rect_flash_remaining,
+            gesture_loc, gesture_status, last_double_tap_ts, prof_times, hand_state
+        )
+
+        # Draw UI overlay
+        t = time.time()
+        timer, fps_state = draw_ui_overlay(display_img, components['model_detector'],
+                                           gesture_status, timer, fps_state, cap)
+        prof_times['ui'] += time.time() - t
+
+        # Handle display and keyboard input
+        should_continue, display_frame_counter, fps_state = handle_display_and_input(
+            display_img, display_frame_counter, display_thread,
+            stop_event, frame, workers, components, prof_times, fps_state, headless=headless
+        )
+        if not should_continue:
+            break
+
+        # Update Pyglet event loop
+        t = time.time()
+        pyglet.clock.tick()
+        pyglet.app.platform_event_loop.dispatch_posted_events()
+        prof_times['pyglet'] += time.time() - t
+
+        # Update performance statistics
+        frame_count, prof_start, prof_times = update_performance_stats(
+            frame_count, prof_start, prof_times, PROF_INTERVAL
+        )
+    
+    # Cleanup display thread
+    if display_thread:
+        display_thread.stop()
+
+
+def stop_all_sounds(components):
+    """
+    Stop all currently playing sounds.
+    
+    Args:
+        components (dict): System components containing audio players
+    """
+    logger.info("Stopping all sounds...")
+    
+    # Stop ambient sounds
+    try:
+        components['heartbeat_player'].pause_sound()
+    except Exception as e:
+        logger.debug(f"Error stopping heartbeat: {e}")
+    
+    try:
+        components['crickets_player'].pause_sound()
+    except Exception as e:
+        logger.debug(f"Error stopping crickets: {e}")
+    
+    # Stop all zone audio player sounds (includes welcome, goodbye, description, zones)
+    try:
+        components['camio_player'].stop_all()
+    except Exception as e:
+        logger.debug(f"Error stopping camio_player: {e}")
+
+
+def cleanup(cap, components, workers):
+    """
+    Clean up resources and shut down gracefully.
+
+    Args:
+        cap: Camera capture object
+        components (dict): System components
+        workers (dict): Worker threads
+    """
+    logger.info("Cleaning up resources...")
+
+    # Save collected tap data if enabled
+    try:
+        pose_detector = components.get('pose_detector')
+        if pose_detector and hasattr(pose_detector, 'data_collector'):
+            collector = pose_detector.data_collector
+            logger.debug(f"Data collector found: enabled={collector.enabled}, "
+                        f"total_collected={collector.total_collected}")
+            if collector.enabled and collector.total_collected > 0:
+                logger.info(f"Saving {collector.total_collected} collected tap samples...")
+                stats = collector.get_statistics()
+                logger.info(f"  Positive: {stats['positive_samples']}, "
+                          f"Negative: {stats['negative_samples']}")
+                filepath = collector.save_json()
+                if filepath:
+                    logger.info(f"Tap data saved to {filepath}")
+            elif collector.enabled and collector.total_collected == 0:
+                logger.info("Data collection was enabled but no samples were collected")
+        else:
+            logger.debug("No data collector found in pose_detector")
+    except Exception as e:
+        logger.error(f"Error saving collected tap data: {e}", exc_info=True)
+
+    # Stop all currently playing sounds before goodbye
+    stop_all_sounds(components)
+    
+    # Clear any pending audio commands in the queue
+    workers['audio_worker'].clear_queue()
+
+    # Play goodbye using AudioWorker's blocking method (cleaner architecture)
+    # This method bypasses the async queue and returns a player object
+    try:
+        logger.info("Playing goodbye message via AudioWorker blocking method...")
+        
+        goodbye_player = workers['audio_worker'].play_goodbye_blocking()
+        logger.info(f"Goodbye player created: {goodbye_player}")
+        
+        # Keep pyglet event loop running so audio can actually play
+        goodbye_start = time.time()
+        goodbye_duration = 1.0
+        
+        while time.time() - goodbye_start < goodbye_duration:
+            # Check if player is still alive and playing
+            if goodbye_player:
+                pyglet.clock.tick()
+                pyglet.app.platform_event_loop.dispatch_posted_events()
+            time.sleep(0.01)  # Small sleep to avoid busy-waiting
+            
+        logger.info("Goodbye message playback time completed")
+        
+        # Clean up goodbye player
+        if goodbye_player:
+            try:
+                goodbye_player.pause()
+                goodbye_player.delete()
+            except Exception as e:
+                logger.debug(f"Error cleaning up goodbye player: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error playing goodbye message: {e}", exc_info=True)
+
+    # Stop worker threads
+    logger.info("Stopping worker threads...")
+    workers['pose_worker'].stop()
+    workers['sift_worker'].stop()
+    workers['audio_worker'].stop()
+
+    # Wait for threads to exit
+    workers['pose_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+    workers['sift_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+    workers['audio_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+
+    # Release camera and close windows
+    cap.release()
+    cv.destroyAllWindows()
+
+    logger.info("Cleanup complete")
+
+
+# ==================== Main Entry Point ====================
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='CamIO - Interactive Map System')
+    parser.add_argument('--input1', help='Path to map configuration JSON file',
+                       default='models/UkraineMap/UkraineMap.json')
+    parser.add_argument('--headless', action='store_true',
+                       help='Run in headless mode (no display window) - useful for Raspberry Pi daemon mode')
+    args = parser.parse_args()
+
+    # Apply headless mode to configuration if specified
+    if args.headless:
+        CameraConfig.HEADLESS = True
+        logger.info("Headless mode enabled via command line argument")
+
+    # Initialize system
+    components = initialize_system(args.input1)
+    cap = setup_camera(components['cam_port'])
+
+    # Setup shutdown handling
+    stop_event = threading.Event()
+    setup_signal_handler(stop_event)
+
+    # Create worker threads
+    workers = create_worker_threads(components, stop_event)
+
+    # UI state
+    last_double_tap_ts = 0.0
+    rect_flash_remaining = 0
+    timer = time.time() - 1
+
+    if not CameraConfig.HEADLESS:
+        logger.info("Controls: 'h'=re-detect map, 'b'=toggle blips, 'q'=quit")
+    else:
+        logger.info("Running in headless mode. Send SIGINT (Ctrl+C) or SIGTERM to stop.")
+
+    # ==================== Main Loop ====================
+    try:
+        run_main_loop(cap, components, workers, stop_event, headless=CameraConfig.HEADLESS)
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received, shutting down...")
+        stop_event.set()
+    finally:
+        cleanup(cap, components, workers)

@@ -1,0 +1,24 @@
+# Python cache
+__pycache__
+
+# Build files
+build
+
+# pyinstaller folders
+dist
+output
+
+# Camera parameters
+camera_parameters.json
+
+# Executables
+*.exe
+simple_camio
+simple_calibration
+
+*.spec
+.DS_STORE
+
+venv/
+
+.idea/
