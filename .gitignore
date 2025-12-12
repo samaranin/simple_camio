@@ -22,3 +22,8 @@ simple_calibration
 venv/
 
 .idea/
+
+# uv 
+uv.lock
+.python-version
+pyproject.toml

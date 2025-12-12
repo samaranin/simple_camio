@@ -49,7 +49,7 @@ def draw_map_tracking(display_img, model_detector, interact, rect_flash_remainin
     return display_img, rect_flash_remaining
 
 
-def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_state, cap):
+def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_state, cap, zone_name=""):
     """
     Draw status information overlay on the display image.
 
@@ -112,6 +112,9 @@ def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_stat
         cv.putText(display_img, display_fps_text, (10, 90),
                   cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
                   UIConfig.COLOR_CYAN, UIConfig.FONT_THICKNESS)
+    if zone_name: 
+        cv.putText(display_img, f"Zone: {zone_name}", (10, 150),
+                cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE, UIConfig.COLOR_YELLOW, UIConfig.FONT_THICKNESS)
 
     return current_time, fps_state
 
