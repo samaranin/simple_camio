@@ -626,6 +626,15 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         # Get latest pose detection results
         gesture_loc, gesture_status, annotated = get_pose_results(workers, prof_times)
         display_img = frame if annotated is None else annotated
+        
+        # Determine zone name for debug overlay
+        zone_name = ""
+        try:
+            zone_id = components['interact'].push_gesture(gesture_loc)
+            if zone_id in components['camio_player'].hotspots:
+                zone_name = components['camio_player'].hotspots[zone_id]['textDescription']
+        except Exception:
+            zone_name = ""
 
         # Check for homography update (triggers flash)
         if getattr(components['model_detector'], 'homography_updated', False):
@@ -641,7 +650,7 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         # Draw UI overlay
         t = time.time()
         timer, fps_state = draw_ui_overlay(display_img, components['model_detector'],
-                                           gesture_status, timer, fps_state, cap)
+                                           gesture_status, timer, fps_state, cap, zone_name)
         prof_times['ui'] += time.time() - t
 
         # Handle display and keyboard input
