@@ -19,8 +19,8 @@ class CameraConfig:
 
     # Default camera resolution (lower = faster)
     # Try 640x480 for best FPS, 1280x720 for balance, 1920x1080 for quality
-    DEFAULT_WIDTH = 1280
-    DEFAULT_HEIGHT = 720
+    DEFAULT_WIDTH = 1920
+    DEFAULT_HEIGHT = 1080
 
     # Camera buffer size (reduce latency)
     BUFFER_SIZE = 1
@@ -33,6 +33,11 @@ class CameraConfig:
     
     # Target FPS for camera (actual may vary by camera capability)
     TARGET_FPS = 30
+
+    # Low-power sleep mode. The app only enters sleep after the map is already
+    # tracked and no valid hand gesture has been seen for a while.
+    SLEEP_FPS = 1
+    SLEEP_AFTER_SECONDS = 15.0
     
     # Use threaded camera capture (can improve FPS significantly)
     USE_THREADED_CAPTURE = True

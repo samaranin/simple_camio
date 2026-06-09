@@ -420,6 +420,49 @@ def get_pose_results(workers, prof_times):
     return gesture_loc, gesture_status, annotated
 
 
+def update_sleep_mode(components, cap, gesture_loc, sleep_state):
+    """
+    Switch between active FPS and low-power sleep FPS.
+
+    Sleep is allowed only after the map has been found. While the app is still
+    searching for the detection area, it stays active so SIFT receives full
+    quality, frequent frames.
+    """
+    now = time.time()
+    model_detector = components['model_detector']
+    map_tracked = (
+        model_detector.H is not None and
+        not getattr(model_detector, 'requires_homography', True)
+    )
+    gesture_active = is_gesture_valid(gesture_loc)
+
+    if not map_tracked or gesture_active:
+        sleep_state['last_activity_ts'] = now
+
+    sleep_active = (
+        map_tracked and
+        not gesture_active and
+        (now - sleep_state['last_activity_ts']) >= CameraConfig.SLEEP_AFTER_SECONDS
+    )
+    target_fps = CameraConfig.SLEEP_FPS if sleep_active else CameraConfig.TARGET_FPS
+
+    if sleep_state.get('target_fps') != target_fps:
+        if hasattr(cap, 'set_target_fps'):
+            cap.set_target_fps(target_fps)
+        elif hasattr(cap, 'set'):
+            cap.set(cv.CAP_PROP_FPS, target_fps)
+
+        if sleep_active:
+            logger.info(f"Sleep mode enabled: throttling to {target_fps} FPS")
+        else:
+            logger.info(f"Active mode enabled: throttling to {target_fps} FPS")
+
+        sleep_state['target_fps'] = target_fps
+
+    sleep_state['active'] = sleep_active
+    return sleep_state
+
+
 def process_map_detection(components, workers, display_img, rect_flash_remaining, 
                           gesture_loc, gesture_status, last_double_tap_ts, prof_times,
                           hand_state):
@@ -473,7 +516,8 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
 
 
 def handle_display_and_input(display_img, display_frame_counter, display_thread, 
-                             stop_event, frame, workers, components, prof_times, fps_state, headless=False):
+                             stop_event, frame, workers, components, prof_times,
+                             fps_state, headless=False, sleep_active=False):
     """
     Handle frame display and keyboard input.
 
@@ -488,6 +532,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         prof_times (dict): Performance timing dictionary
         fps_state (dict): FPS tracking state
         headless (bool): Whether running in headless mode (no display)
+        sleep_active (bool): Whether the main loop is throttled to sleep FPS
         
     Returns:
         tuple: (should_continue, updated_counter, updated_fps_state)
@@ -499,7 +544,10 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
     
     # Check if should display this frame
     display_frame_counter += 1
-    should_display = (display_frame_counter >= CameraConfig.DISPLAY_FRAME_SKIP)
+    should_display = (
+        sleep_active or
+        display_frame_counter >= CameraConfig.DISPLAY_FRAME_SKIP
+    )
     if should_display:
         display_frame_counter = 0
     
@@ -530,6 +578,8 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
     prof_times['key'] += time.time() - t
     
     return should_continue, display_frame_counter, fps_state
+
+
 def update_performance_stats(frame_count, prof_start, prof_times, PROF_INTERVAL):
     """
     Update and log performance statistics.
@@ -583,6 +633,11 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         'description_played': False,   # Whether map description has been played once
         'first_detected_ts': 0.0       # Timestamp when hand was first detected (for cooldown)
     }
+    sleep_state = {
+        'active': False,
+        'target_fps': None,
+        'last_activity_ts': time.time()
+    }
     
     # FPS tracking state
     fps_state = {
@@ -606,8 +661,6 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
     # Play welcome message at startup and start with crickets
     workers['audio_worker'].enqueue_command(AudioCommand('play_welcome'))
     workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
-
-    _target_period = 1.0 / CameraConfig.TARGET_FPS
 
     # Main processing loop
     while cap.isOpened() and not stop_event.is_set():
@@ -642,6 +695,8 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
             gesture_loc, gesture_status, last_double_tap_ts, prof_times, hand_state
         )
 
+        sleep_state = update_sleep_mode(components, cap, gesture_loc, sleep_state)
+
         # Draw UI overlay
         t = time.time()
         timer, fps_state = draw_ui_overlay(display_img, components['model_detector'],
@@ -651,7 +706,8 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         # Handle display and keyboard input
         should_continue, display_frame_counter, fps_state = handle_display_and_input(
             display_img, display_frame_counter, display_thread,
-            stop_event, frame, workers, components, prof_times, fps_state, headless=headless
+            stop_event, frame, workers, components, prof_times, fps_state,
+            headless=headless, sleep_active=sleep_state['active']
         )
         if not should_continue:
             break
@@ -662,8 +718,10 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         pyglet.app.platform_event_loop.dispatch_posted_events()
         prof_times['pyglet'] += time.time() - t
 
-        # Cap main loop to TARGET_FPS to avoid spinning at full CPU speed
+        # Cap main loop to active/sleep FPS to avoid spinning at full CPU speed.
         t = time.time()
+        target_fps = sleep_state['target_fps'] or CameraConfig.TARGET_FPS
+        _target_period = 1.0 / max(target_fps, 0.1)
         _remaining = _target_period - (t - _loop_start)
         if _remaining > 0:
             time.sleep(_remaining)
