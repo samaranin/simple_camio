@@ -275,6 +275,9 @@ STUB_PIPER = textwrap.dedent('''
         sys.exit(1)
 
     os.makedirs(os.path.dirname(args.output_file) or '.', exist_ok=True)
+    # Record the text verbatim so a test can assert what reached piper.
+    with open(args.output_file + '.txt', 'w', encoding='utf-8') as f:
+        f.write(text)
     with wave.open(args.output_file, 'wb') as w:
         w.setnchannels(1)
         w.setsampwidth(2)
@@ -370,7 +373,8 @@ def test_sample_model_parses_and_keeps_its_formatting(sample_model_file):
 ```
 
 Run: `.venv/bin/python -m pytest tests/ -v`
-Expected: 6 passed
+Expected: 6 passed (the stub also writes <output_file>.txt; the WAV assertions are
+unaffected)
 
 - [ ] **Step 8: Keep the voice model out of git**
 
@@ -482,6 +486,19 @@ def test_one_failing_clip_does_not_stop_the_others(stub_piper, stub_voice, tmp_p
     assert [j.output_path.name for j in failed] == ['b.wav']
 
 
+def test_capital_cyrillic_is_lowercased_before_it_reaches_piper(
+        stub_piper, stub_voice, tmp_path):
+    """
+    The uk_UA voices' phoneme maps lack capital Cyrillic, so 'Хрещатик' loses its
+    leading sound. Every zone name is capitalised, so this must not reach piper.
+    """
+    out = tmp_path / 'a.wav'
+    engine.synthesize(
+        [engine.SynthesisJob(text='Хрещатик', output_path=out)],
+        piper_bin=str(stub_piper), voice='test_voice', voices_dir=stub_voice)
+    assert out.with_suffix('.wav.txt').read_text(encoding='utf-8') == 'хрещатик'
+
+
 def test_progress_is_reported_per_clip(stub_piper, stub_voice, tmp_path):
     seen = []
     jobs = [engine.SynthesisJob(text=f'текст {i}', output_path=tmp_path / f'{i}.wav')
@@ -547,6 +564,21 @@ class SynthesisJob:
 
     text: str
     output_path: Path
+
+
+def _phonemizable(text):
+    """
+    Prepare text for piper by lowercasing it.
+
+    The uk_UA voices' phoneme id maps have no entries for capital Cyrillic:
+    'Хрещатик' logs "Missing phoneme from id map: Х" and is synthesized without
+    its initial sound, while 'хрещатик' comes out whole. Every zone name starts
+    with a capital, so this is not an edge case.
+
+    It belongs here rather than in the narration text, because textDescription is
+    also the zone name shown and logged elsewhere and has to stay capitalised.
+    """
+    return text.lower()
 
 
 def resolve_piper(piper_bin=None):
@@ -647,7 +679,7 @@ def synthesize(jobs, *, piper_bin=None, voice=None, voices_dir=None, progress=No
         try:
             result = subprocess.run(
                 command,
-                input=job.text,
+                input=_phonemizable(job.text),
                 text=True,
                 capture_output=True,
                 timeout=TTSConfig.TIMEOUT_SECONDS,
@@ -676,7 +708,7 @@ def synthesize(jobs, *, piper_bin=None, voice=None, voices_dir=None, progress=No
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_tts_engine.py -v`
-Expected: 9 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Confirm it works against the real piper**
 
