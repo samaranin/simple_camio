@@ -41,9 +41,20 @@ def test_cyrillic_is_written_literally_not_escaped():
 
 
 def test_a_value_that_appears_twice_is_refused():
-    text = '{"a":"same", "b":"same"}'
+    """
+    Ambiguity means the SAME key and value twice - two hotspots pointing at one
+    audio file, say. Two different keys sharing a value is not ambiguous, because
+    the needle is the key/value pair, not the value alone.
+    """
+    text = '[{"a":"same"},{"a":"same"}]'
     with pytest.raises(json_edit.JsonEditError, match='2 times'):
         json_edit.replace_string_value(text, 'a', 'same', 'different')
+
+
+def test_two_keys_sharing_a_value_is_not_ambiguous():
+    text = '{"a":"same", "b":"same"}'
+    assert json_edit.replace_string_value(text, 'a', 'same', 'different') == \
+        '{"a":"different", "b":"same"}'
 
 
 def test_a_value_that_is_not_there_is_refused():
@@ -83,3 +94,29 @@ def test_write_verified_adds_no_trailing_newline(tmp_path):
     target = tmp_path / 'model.json'
     json_edit.write_verified(target, '{"a":"one"}', {'a': 'one'})
     assert not target.read_text(encoding='utf-8').endswith('\n')
+
+
+def test_a_real_value_shared_across_two_keys_edits_only_the_intended_one():
+    """
+    This is the shape that broke round 1: models/CnapMap/CnapFirstFloor.json
+    genuinely reuses one audio file for both the map's "map_description" and one
+    hotspot's "audioDescription". A synthetic fixture wouldn't have caught the
+    regression, so this test reads the real file (without writing to it).
+    """
+    raw = open('models/CnapMap/CnapFirstFloor.json', encoding='utf-8').read()
+    shared_value = 'models/CnapMap/Audio/Passport Services.mp3'
+    assert raw.count(json.dumps(shared_value, ensure_ascii=False)) == 2, \
+        'fixture assumption changed: the value is no longer shared by two keys'
+
+    edited = json_edit.replace_string_value(
+        raw, 'audioDescription', shared_value,
+        'models/CnapMap/Audio/tts/Passport Services.wav')
+
+    # The hotspot's audioDescription changed...
+    assert '"audioDescription":"models/CnapMap/Audio/tts/Passport Services.wav"' in edited
+    # ...but the map's map_description, which shared the same value, did not.
+    assert f'"map_description":"{shared_value}"' in edited
+
+    before, after = raw.split('\n'), edited.split('\n')
+    changed = [i for i, (a, b) in enumerate(zip(before, after), 1) if a != b]
+    assert len(before) == len(after) and len(changed) == 1

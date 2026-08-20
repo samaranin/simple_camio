@@ -47,22 +47,17 @@ def replace_string_value(text, key, old_value, new_value):
     old_literal = json.dumps(old_value, ensure_ascii=False)
     new_literal = json.dumps(new_value, ensure_ascii=False)
 
-    # Ambiguity is judged on the value itself: if the same value string shows up
-    # more than once anywhere in the file -- even under a different key -- a
-    # blind text.replace() could land on the wrong occurrence, so refuse rather
-    # than guess.
-    occurrences = text.count(old_literal)
-    if occurrences > 1:
-        raise JsonEditError(
-            f'{key}={old_value!r} appears {occurrences} times; '
-            f'cannot edit it unambiguously'
-        )
-
     # The models use both "key":"value" and "key": "value".
     for gap in ('', ' '):
         needle = f'{key_literal}:{gap}{old_literal}'
-        if needle in text:
+        occurrences = text.count(needle)
+        if occurrences == 1:
             return text.replace(needle, f'{key_literal}:{gap}{new_literal}', 1)
+        if occurrences > 1:
+            raise JsonEditError(
+                f'{key}={old_value!r} appears {occurrences} times; '
+                f'cannot edit it unambiguously'
+            )
 
     raise JsonEditError(f'could not find {key}={old_value!r} in the text')
 
