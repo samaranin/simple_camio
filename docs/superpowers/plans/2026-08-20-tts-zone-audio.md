@@ -1958,7 +1958,10 @@ Content, not code. It lands on its own so the JSON diff is the review surface.
 .venv/bin/python - <<'EOF'
 import json, glob
 for path in sorted(glob.glob('models/*/*.json')):
-    model = json.loads(open(path, encoding='utf-8').read())['model']
+    document = json.loads(open(path, encoding='utf-8').read())
+    if 'model' not in document:
+        continue          # e.g. models/tts_voices/*.onnx.json - a voice, not a map
+    model = document['model']
     print(f'\n=== {path} ===')
     for i, h in enumerate(model.get('hotspots', [])):
         print(f'  [{i:2d}] {h.get("textDescription", "")}')
@@ -2048,7 +2051,22 @@ import unicodedata
 
 import pytest
 
-MODEL_FILES = sorted(glob.glob('models/*/*.json'))
+def _model_files():
+    """
+    Map models under models/, identified by having a "model" section.
+
+    A bare glob also matches the Piper voice config that Task 1 downloads to
+    models/tts_voices/, which has no hotspots and would fail every test here.
+    """
+    found = []
+    for path in sorted(glob.glob('models/*/*.json')):
+        with open(path, encoding='utf-8') as f:
+            if 'model' in json.load(f):
+                found.append(path)
+    return found
+
+
+MODEL_FILES = _model_files()
 
 
 def _is_cyrillic(text):
