@@ -28,3 +28,6 @@ venv/
 # Added by graphify
 graphify-out/
 
+
+# Piper voice models - ~77 MB each, fetched per docs/tts-setup.md
+models/tts_voices/

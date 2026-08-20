@@ -333,3 +333,34 @@ class WorkerConfig:
 
     # Thread shutdown timeout (seconds)
     THREAD_SHUTDOWN_TIMEOUT = 2.0
+
+
+# ==================== Text-to-Speech Configuration ====================
+class TTSConfig:
+    """
+    Configuration for generating zone narration with Piper.
+
+    Used by both paths: the offline generator (src/tts/generate_audio.py) and the
+    runtime fallback in ZoneAudioPlayer.
+    """
+
+    # Piper voice name. The voice is two files in VOICES_DIR:
+    # <VOICE>.onnx and <VOICE>.onnx.json
+    VOICE = 'uk_UA-ukrainian_tts-medium'
+
+    # Where the downloaded voice lives. Not committed - the model is ~77 MB.
+    # See docs/tts-setup.md for the download command.
+    VOICES_DIR = 'models/tts_voices'
+
+    # Path to the piper executable. None means "look it up on PATH".
+    PIPER_BIN = None
+
+    # Synthesize narration that is missing when a model is loaded. Turn this off
+    # to run strictly on pre-generated files.
+    RUNTIME_FALLBACK = True
+
+    # Subdirectory of a model's audio directory where generated files are written.
+    GENERATED_SUBDIR = 'tts'
+
+    # Give up on a single clip after this long.
+    TIMEOUT_SECONDS = 60
