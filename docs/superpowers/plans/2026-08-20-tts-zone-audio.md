@@ -427,6 +427,22 @@ def test_resolve_piper_rejects_a_path_that_is_not_there():
         engine.resolve_piper('/nonexistent/piper')
 
 
+def test_resolve_piper_finds_it_beside_the_interpreter(monkeypatch, tmp_path):
+    """
+    piper installs into .venv/bin/, which is not on PATH because the project runs
+    as .venv/bin/python without activating the venv. shutil.which alone misses it.
+    """
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    piper = fake_bin / 'piper'
+    piper.write_text('#!/bin/sh\n')
+    piper.chmod(0o755)
+
+    monkeypatch.setattr(engine.sys, 'executable', str(fake_bin / 'python'))
+    monkeypatch.setattr(engine.shutil, 'which', lambda name: None)
+    assert engine.resolve_piper() == str(piper)
+
+
 def test_resolve_voice_names_the_files_it_wanted(tmp_path):
     with pytest.raises(engine.TTSUnavailable, match='uk_UA'):
         engine.resolve_voice(voice='uk_UA-missing', voices_dir=tmp_path)
@@ -512,6 +528,7 @@ dependency stays at arm's length behind a process boundary.
 import logging
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -536,8 +553,12 @@ def resolve_piper(piper_bin=None):
     """
     Locate the piper executable.
 
+    Checks, in order: the explicit argument, TTSConfig.PIPER_BIN, a `piper` sitting
+    beside the running interpreter, then PATH.
+
     Args:
-        piper_bin (str, optional): Explicit path. Falls back to TTSConfig, then PATH.
+        piper_bin (str, optional): Explicit path. Falls back to TTSConfig, then to
+            the interpreter's own directory, then PATH.
 
     Returns:
         str: Path to the executable.
@@ -550,6 +571,13 @@ def resolve_piper(piper_bin=None):
         if Path(candidate).is_file():
             return str(candidate)
         raise TTSUnavailable(f"piper not found at {candidate}")
+
+    # Look beside the running interpreter before consulting PATH. piper installs
+    # into .venv/bin/, and this project runs as .venv/bin/python without the venv
+    # activated, so .venv/bin is not on PATH and shutil.which() misses it.
+    beside_interpreter = Path(sys.executable).parent / 'piper'
+    if beside_interpreter.is_file():
+        return str(beside_interpreter)
 
     found = shutil.which('piper')
     if not found:
@@ -648,7 +676,7 @@ def synthesize(jobs, *, piper_bin=None, voice=None, voices_dir=None, progress=No
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_tts_engine.py -v`
-Expected: 8 passed
+Expected: 9 passed
 
 - [ ] **Step 5: Confirm it works against the real piper**
 
