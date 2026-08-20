@@ -1946,9 +1946,13 @@ For Heart and UkraineMap this is de-transliteration. Use these:
 
 Write the full 52-row draft into the pull request or chat as a three-column table (index, current, proposed) grouped by model, with the signage-dependent CnapMap rows flagged.
 
-- [ ] **Step 3: Get the owner's approval on the table**
+- [ ] **Step 3: Note that the approval gate was waived**
 
-Do not edit any JSON until the table has been reviewed. The maps have printed physical counterparts and the narration has to match them; nobody reading the code can verify this.
+The owner waived the review gate for this run: apply the drafted table and let the
+JSON diff serve as the review surface after the fact. Record in the commit message
+that the Cyrillic is unreviewed. The maps still have printed physical counterparts,
+and the CnapMap labels in particular have to match the real signage, so the diff
+needs a human pass before this reaches a deployed device.
 
 - [ ] **Step 4: Apply the approved text**
 
@@ -2083,9 +2087,11 @@ git commit -m "content: rewrite the narration text in Ukrainian"
 - Consumes: everything above
 - Produces: generated narration for all three maps and the documentation to reproduce it
 
-- [ ] **Step 1: Decide whether the generated audio is committed**
+- [ ] **Step 1: Keep the generated audio out of git**
 
-The WAVs are build output from text that is already in git. Committing them makes a map self-contained on a Pi with no Piper; not committing them keeps the repository small and makes the runtime fallback the mechanism that matters. Ask the owner, and record the answer here before continuing. If they are not committed, add to `.gitignore`:
+Decided by the owner: the WAVs are build output from text that is already in git, so
+they are not committed. That keeps the repository small and makes the runtime
+fallback the mechanism that actually matters. Add to `.gitignore`:
 
 ```
 # Generated narration - rebuild with python -m src.tts.generate_audio
