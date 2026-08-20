@@ -96,3 +96,34 @@ def test_missing_piper_raises_before_any_work(stub_voice, tmp_path):
         engine.synthesize(jobs, piper_bin='/nonexistent/piper',
                           voice='test_voice', voices_dir=stub_voice)
     assert not (tmp_path / 'a.wav').exists()
+
+
+def test_a_timed_out_clip_fails_without_stopping_its_sibling(
+        monkeypatch, stub_piper, stub_voice, tmp_path):
+    """
+    A stuck piper subprocess must land its clip in `failed`, not raise past
+    synthesize() and not stall a sibling job in the same batch. This is the path
+    that matters most on the Pi: a hung subprocess must not freeze the assistive
+    device mid-session.
+
+    subprocess.run is monkeypatched to raise TimeoutExpired for one job's text and
+    to run the real stub for the other, so the test adds no wall-clock delay and
+    never touches TTSConfig.TIMEOUT_SECONDS.
+    """
+    real_run = engine.subprocess.run
+
+    def fake_run(command, *, input, **kwargs):
+        if input == 'time out me':
+            raise engine.subprocess.TimeoutExpired(cmd=command, timeout=1)
+        return real_run(command, input=input, **kwargs)
+
+    monkeypatch.setattr(engine.subprocess, 'run', fake_run)
+
+    jobs = [
+        engine.SynthesisJob(text='Time Out Me', output_path=tmp_path / 'a.wav'),
+        engine.SynthesisJob(text='Сектор А', output_path=tmp_path / 'b.wav'),
+    ]
+    ok, failed = engine.synthesize(
+        jobs, piper_bin=str(stub_piper), voice='test_voice', voices_dir=stub_voice)
+    assert [j.output_path.name for j in failed] == ['a.wav']
+    assert [j.output_path.name for j in ok] == ['b.wav']
