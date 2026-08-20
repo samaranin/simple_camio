@@ -26,7 +26,7 @@ STUB_PIPER = textwrap.dedent('''
     args, _ = parser.parse_known_args()
 
     text = sys.stdin.read()
-    if 'BOOM' in text:
+    if 'boom' in text.lower():
         sys.stderr.write('stub piper: refusing to synthesize\\n')
         sys.exit(1)
 
