@@ -1,0 +1,78 @@
+# .graphifyignore — what stays out of the knowledge graph.
+#
+# Syntax is gitignore's, in full:
+#   #  comment          blank lines ignored
+#   /  trailing         directory only  (models/)
+#   /  leading/embedded anchors to this file's directory  (/models, src/*.log)
+#   *  matches within one path segment, never across /
+#   ** crosses path segments  (models/**/*.mp3)
+#   !  re-includes a previously excluded path; last match wins
+#
+# graphify merges this with .gitignore — .gitignore is read first, this file
+# last, so a rule here overrides one there. Two limits worth knowing:
+#   * a `!` here cannot rescue a file whose parent directory is excluded
+#     (list the file's own path instead of negating inside a dropped dir);
+#   * .graphifyinclude is no longer supported — `!` below is the only way back.
+#
+# The lists are deliberately self-contained rather than leaning on .gitignore,
+# so editing .gitignore never silently changes what the graph covers.
+
+# ==================== Program models and media assets ====================
+# Runtime DATA the app loads, not logic it runs: map definitions, colour-coded
+# zone maps, print templates, the trained tap-classifier weights, and the
+# narration audio. This is 84 of the repo's 119 files (57 mp3, 14 png, 3 jpg,
+# the model JSONs) and yields no code structure — the model JSONs already
+# extracted to zero nodes. Dropping them keeps the graph about the code.
+models/
+MP3/
+
+# Collected tap samples used to retrain the classifier (dataset, not code)
+data/
+
+# README illustrations of the pointing gesture
+img/
+
+# To pull one map definition back in for its zone -> audio mapping, name the
+# file itself — a `!` inside the excluded models/ directory would not apply:
+# !models/UkraineMap/UkraineMap.json
+
+# ==================== Python environment ====================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# ==================== Tool caches ====================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# ==================== Build and packaging artifacts ====================
+build/
+dist/
+output/
+*.spec
+*.exe
+
+# ==================== Editor and OS droppings ====================
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+desktop.ini
+*.swp
+*~
+
+# ==================== Local, machine-specific, secret ====================
+.claude/
+graphify-out/
+camera_parameters.json
+.env
+.env.*
+*.log

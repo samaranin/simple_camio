@@ -41,7 +41,7 @@ Scaled parameters include:
 - Enhanced detection thresholds (PLANE_*, ZREL_*)
 
 USAGE:
-    from pose_detector import CombinedPoseDetector
+    from src.detection.pose_detector import CombinedPoseDetector
     
     detector = CombinedPoseDetector(model)
     index_pos, status, img = detector.detect(frame, H, None, draw=True)
@@ -2183,13 +2183,6 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         st['prev_ang'] = st['ema_ang']
         st['prev_plane'] = st['ema_plane']
 
-    # ---------- Stronger pointing gate ----------
-    def _strong_pointing_gate(self, hand_landmarks, w, h):
-        """Stricter pointing gate using extension ratios of each finger."""
-        def L(i):
-            lm = hand_landmarks.landmark[i]
-            return np.array([lm.x, lm.y, lm.z], dtype=float)
-    
     # ==================== Enhanced Data Collection Methods ====================
     
     def _determine_enhanced_rejection_reason(self, duration, drift, st, thresholds, 
@@ -2282,7 +2275,7 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
         except Exception as e:
             logger.debug(f"Failed to collect enhanced negative tap data: {e}")
     
-    # ---------- Stronger pointing gate (continued) ----------
+    # ---------- Stronger pointing gate ----------
     def _strong_pointing_gate(self, hand_landmarks, w, h):
         """Stricter pointing gate using extension ratios of each finger."""
         def L(i):

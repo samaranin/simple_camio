@@ -126,9 +126,17 @@ class TapClassifier:
         self.true_negatives = 0
         self.false_negatives = 0
 
-        # Load pre-trained model if provided
-        if model_path and Path(model_path).exists():
-            self.load_model(model_path)
+        # Load pre-trained model if provided. A path that does not exist is
+        # reported: staying silent here meant a wrong path looked exactly like
+        # a successful load, and callers ran on the default weights unaware.
+        if model_path:
+            if Path(model_path).exists():
+                self.load_model(model_path)
+            else:
+                logger.warning(
+                    f"Model path {model_path} does not exist; "
+                    f"continuing with default weights"
+                )
 
         logger.info(f"Initialized TapClassifier with {self.num_features} features")
 

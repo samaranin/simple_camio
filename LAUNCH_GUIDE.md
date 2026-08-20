@@ -15,19 +15,22 @@ This will load the default map: `models/UkraineMap/UkraineMap.json`
 ### Method 2: Specifying a Custom Map
 
 ```powershell
-python simple_camio.py --input1 models/RivneMap/RivneMap.json
+python simple_camio.py --input1 models/CnapMap/CnapFirstFloor.json
 ```
 
-Or with the TestDemo:
+Or the heart model:
 
 ```powershell
-python simple_camio.py --input1 models/TestDemo/demo_map.json
+python simple_camio.py --input1 models/Heart/Heart.json
 ```
 
-### Method 3: Using the Executable (if built)
+### Method 3: Unattended / Daemon
 
-```powershell
-simple_camio.exe --input1 models/UkraineMap/UkraineMap.json
+Pass `--camera` so startup never has to ask which camera to use, and
+`--headless` to skip the preview window:
+
+```bash
+python simple_camio.py --headless --camera 0 --input1 models/CnapMap/CnapFirstFloor.json
 ```
 
 ## User Controls (Same as Before)
@@ -38,59 +41,40 @@ Once the application starts:
 - **`h`**: Manually trigger map re-detection (if tracking is lost)
 - **`b`**: Toggle blip sounds on/off when moving between zones
 
+Under `--headless` there is no window, so no keys are read. Stop the process
+with Ctrl+C or `SIGTERM`; either one runs the full shutdown.
+
 ## What's Different (For Developers)
 
-While the launch is identical, the code structure has changed significantly:
+The launch command is unchanged, but the code was split out of the original
+three flat modules into the `src/` package: `src/core/`, `src/detection/`,
+`src/audio/`, `src/ui/` and `src/tap_classifier/`, with all tunable parameters
+in `src/config.py`.
 
-### Old Structure (Before Refactoring)
-```
-simple_camio.py        (1000+ lines, everything mixed together)
-simple_camio_2d.py     (200+ lines, interaction and audio)
-simple_camio_mp.py     (800+ lines, pose detection and SIFT)
-```
-
-### New Structure (After Refactoring)
-```
-simple_camio.py           # Main entry point (~350 lines, clean and organized)
-├── config.py             # All configuration parameters
-├── utils.py              # Utility functions
-├── audio.py              # Audio components
-├── gesture_detection.py  # Movement filters and gesture detection
-├── pose_detector.py      # MediaPipe hand tracking
-├── sift_detector.py      # SIFT-based map tracking
-├── interaction_policy.py # Zone interaction logic
-└── workers.py            # Background worker threads
-```
-
-### Backward Compatibility
-
-The old files (`simple_camio_2d.py` and `simple_camio_mp.py`) still work! They now act as **compatibility layers** that import from the new modules:
-
-```python
-# Old code still works!
-from simple_camio_2d import InteractionPolicy2D, CamIOPlayer2D
-from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP
-
-# These are now imported from the new modular structure behind the scenes
-```
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the current layout and how the
+threads fit together. It is the one place the structure is written down, so it
+does not drift the way the copy that used to live here did.
 
 ## Troubleshooting
 
 ### "Module not found" errors
 
-Make sure all the new files are in the same directory:
-- config.py
-- utils.py
-- audio.py
-- gesture_detection.py
-- pose_detector.py
-- sift_detector.py
-- interaction_policy.py
-- workers.py
+Modules inside `src/` import each other absolutely (`from src.config import ...`),
+so two things matter:
+
+- **Run from the repository root.** That is what puts `src` on the import path;
+  from anywhere else `import src` fails.
+- **Run submodules with `-m`, not as a file path.** `python src/tap_classifier/train_tap_classifier.py`
+  raises `ModuleNotFoundError: No module named 'src'`; use
+  `python -m src.tap_classifier.train_tap_classifier` instead.
 
 ### Camera not detected
 
-The application will automatically detect available cameras. If multiple cameras are found, you'll be prompted to select one.
+Cameras are probed automatically. With exactly one working camera it is selected
+silently. With several, you are prompted only when running in a terminal;
+otherwise the first is used and a warning is logged, since a daemon has no one
+to answer the prompt. Pass `--camera <port>` to skip detection altogether -
+worth doing anyway, as one USB webcam often registers as two `/dev/video` nodes.
 
 ### Map not tracking
 
@@ -102,7 +86,7 @@ The application will automatically detect available cameras. If multiple cameras
 
 You can now easily adjust parameters without digging through code:
 
-**Open `config.py`** and modify values in the configuration classes:
+**Open `src/config.py`** and modify values in the configuration classes:
 
 ```python
 # Example: Make tap detection more sensitive
@@ -113,9 +97,13 @@ class TapDetectionConfig:
 
 **Enable debug logging:**
 
+The logging level is set in `simple_camio.py`, near the top:
+
 ```python
-# In config.py
-LOG_LEVEL = logging.DEBUG  # Change from logging.INFO
+logging.basicConfig(
+    level=logging.DEBUG,  # change from logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 ```
 
 ## Requirements
@@ -126,19 +114,17 @@ Make sure you have all dependencies installed:
 pip install -r requirements.txt
 ```
 
-Required packages (from `requirements.txt`):
-- `mediapipe>=0.10.0,<0.11.0`
-- `numpy>=1.19.5,<1.27`
-- `scipy>=1.5.4,<2.0`
-- `opencv-contrib-python>=4.5.5.64,<5.0.0`
-- `pyglet>=1.5.0,<3.0.0`
+`requirements.txt` is the authoritative list, and its comments explain why the
+mediapipe range is pinned as narrowly as it is. Note that `mediapipe` above
+0.10.21 will not work: those releases dropped the legacy Solutions API this code
+is built on.
 
 ## Testing the Installation
 
 Quick test to verify everything works:
 
 ```powershell
-python -c "from simple_camio_mp import PoseDetectorMP, SIFTModelDetectorMP; print('Import successful!')"
+python -c "from src.detection import CombinedPoseDetector, SIFTModelDetectorMP; print('Import successful!')"
 ```
 
 If you see "Import successful!" without errors, you're ready to run!
@@ -146,10 +132,9 @@ If you see "Import successful!" without errors, you're ready to run!
 ## Summary
 
 ✅ **Launch command is identical to before**
-✅ **All functionality preserved**  
+✅ **All functionality preserved**
 ✅ **Code is now modular and maintainable**
-✅ **Old imports still work**
-✅ **Configuration is centralized**
+✅ **Configuration is centralized in `src/config.py`**
 ✅ **Better logging and error handling**
 
 Just run:

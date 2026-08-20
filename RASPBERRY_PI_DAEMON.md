@@ -278,7 +278,7 @@ sudo pip3 install -r requirements.txt
 
 #### Viewing Debug Logs
 
-Enable debug logging by modifying `src/config.py`:
+Enable debug logging by modifying `simple_camio.py`:
 
 ```python
 # In simple_camio.py or config.py

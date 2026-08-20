@@ -12,6 +12,7 @@ Description: Simple CamIO 2D is a Python version of CamIO specialized to a flat,
 - **Threaded Architecture**: Non-blocking camera capture and display for high performance (400+ FPS)
 - **Data Collection**: Automatic collection of tap detection data for classifier training
 - **Headless Mode**: Run without display window - perfect for Raspberry Pi daemon deployment
+- **Low-Power Sleep**: Drops to 1 FPS once the map is tracked and no hand has been seen for a while
 
 ## Data Collection and Classifier Training
 
@@ -19,12 +20,12 @@ Simple CamIO can now automatically collect tap detection data while you use the 
 
 **Quick Start:**
 
-1. Enable in `config.py`: `TapDetectionConfig.COLLECT_TAP_DATA = True`
+1. Enable in `src/config.py`: `TapDetectionConfig.COLLECT_TAP_DATA = True`
 2. Run the program normally: `python simple_camio.py`
 3. Perform taps as usual - data is collected automatically
-4. Train on your data: `python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir data/tap_dataset`
+4. Train on your data: `python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset`
 
-For detailed instructions, see [DATA_COLLECTION_GUIDE.md](tap_classifier/DATA_COLLECTION_GUIDE.md).
+For detailed instructions, see [DATA_COLLECTION_GUIDE.md](src/tap_classifier/DATA_COLLECTION_GUIDE.md).
 
 Requirements: To run Simple CamIO 2D, one needs to set up several things. 
 - Firstly, There needs to be a json file that defines a model, that is it describes the components of an interactive map.  It contains the filenames of the various components of a model, as well as other important information such as the hotspot dictionary.  An example we recommend using as reference is `models/UkraineMap/UkraineMap.json`.
@@ -36,7 +37,7 @@ Requirements: To run Simple CamIO 2D, one needs to set up several things.
 - Sound files, as named in the hotspots dictionary in the supplied json file, should be placed in the appropriate folder, as specified in the hotspots dictionary. The hotspots dictionary maps the zone index (from the zone map) to the sound file.
 
 - Python 3.9+ installed with the required libraries specified in `requirements.txt`:
-  - `mediapipe>=0.10.0,<0.11.0`
+  - `mediapipe>=0.10.14,<0.10.22`
   - `numpy>=1.19.5,<1.27`
   - `scipy>=1.5.4,<2.0`
   - `opencv-contrib-python>=4.5.5.64,<5.0.0`
@@ -56,18 +57,24 @@ To run with a custom map:
 python simple_camio.py --input1 models/UkraineMap/UkraineMap.json
 ```
 
+To pick a camera explicitly instead of auto-detecting one:
+```bash
+python simple_camio.py --camera 0
+```
+Auto-detection probes `/dev/video*` in order, which is slow and ambiguous: a
+single USB webcam often registers as two nodes. Always pass `--camera` for
+unattended runs.
+
 To run in headless mode (no display window, suitable for Raspberry Pi daemon):
 ```bash
-# Using helper script (automatically handles display setup)
-./run_headless.sh --map models/RivneMap/RivneMap.json
+# Inside a virtual display, so pyglet can still reach an audio device
+xvfb-run -a python simple_camio.py --headless --camera 0 --input1 models/CnapMap/CnapFirstFloor.json
 
-# Or manually with xvfb
-xvfb-run python simple_camio.py --headless
-
-# Or with DISPLAY environment variable
-export DISPLAY=:0
-python simple_camio.py --headless
+# Or against an existing display
+DISPLAY=:0 python simple_camio.py --headless --camera 0
 ```
+Stop it with Ctrl+C or `SIGTERM`; both run the full shutdown (workers joined,
+camera released, goodbye message played).
 
 **Note for Raspberry Pi:** Headless mode requires `xvfb` or a `DISPLAY` environment variable for audio support.
 Install with: `sudo apt-get install xvfb`
@@ -156,18 +163,14 @@ simple_camio/
 │       └── TAP_CLASSIFIER_README.md
 │
 ├── models/                  # Map configurations
-│   ├── UkraineMap/         # Default map
-│   ├── RivneMap/           # Alternative map
-│   └── TestDemo/           # Demo map
+│   ├── UkraineMap/         # Default map (central Kyiv)
+│   ├── CnapMap/            # CNAP first floor plan
+│   └── Heart/              # Anatomical heart model
 │
 ├── data/
 │   └── tap_dataset/        # Collected tap data for training
 │
 ├── tests/                  # Unit tests (future)
-│
-└── legacy/                 # Legacy compatibility files
-    ├── simple_camio_2d.py
-    └── simple_camio_mp.py
 ```
 
 ## Advanced Features
@@ -176,20 +179,23 @@ simple_camio/
 
 Train the tap classifier on synthetic data:
 ```powershell
-python tap_classifier/train_tap_classifier.py --train --samples 1000
+python -m src.tap_classifier.train_tap_classifier --train --samples 1000
 ```
 
-Train from your collected real-world data:
+Train from your collected real-world data. This starts from the default weights
+and replaces `models/tap_model.json`; add `--resume` to continue training the
+model that is already there instead:
 ```powershell
-python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir data/tap_dataset
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --resume --data-dir data/tap_dataset
 ```
 
 Evaluate the trained model:
 ```powershell
-python tap_classifier/train_tap_classifier.py --evaluate
+python -m src.tap_classifier.train_tap_classifier --evaluate
 ```
 
-For more details, see [TAP_CLASSIFIER_README.md](tap_classifier/TAP_CLASSIFIER_README.md).
+For more details, see [TAP_CLASSIFIER_README.md](src/tap_classifier/TAP_CLASSIFIER_README.md).
 
 ### Configuration
 
@@ -217,7 +223,7 @@ All tunable parameters are centralized in `src/config.py`:
 
 **Taps not detected:**
 - Verify your pointing gesture (flat hand, extended index finger)
-- Enable debug logging: set `logging.basicConfig(level=logging.DEBUG)` in `config.py`
+- Enable debug logging: change `level` in the `logging.basicConfig(...)` call near the top of `simple_camio.py`
 - Check `scale_factor` values in logs (should be 0.35-1.0)
 - Try collecting real-world data and retraining the classifier
 
@@ -237,8 +243,8 @@ All tunable parameters are centralized in `src/config.py`:
 - [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed system architecture
 - [LAUNCH_GUIDE.md](LAUNCH_GUIDE.md) - Launch instructions and backward compatibility
 - [.github/copilot-instructions.md](.github/copilot-instructions.md) - Developer guide for AI agents
-- [tap_classifier/DATA_COLLECTION_GUIDE.md](tap_classifier/DATA_COLLECTION_GUIDE.md) - Data collection workflow
-- [tap_classifier/TAP_CLASSIFIER_README.md](tap_classifier/TAP_CLASSIFIER_README.md) - Tap classifier details
+- [src/tap_classifier/DATA_COLLECTION_GUIDE.md](src/tap_classifier/DATA_COLLECTION_GUIDE.md) - Data collection workflow
+- [src/tap_classifier/TAP_CLASSIFIER_README.md](src/tap_classifier/TAP_CLASSIFIER_README.md) - Tap classifier details
 
 __________________________________________________
 ## Legacy Installation Instructions

@@ -1,9 +1,19 @@
-mediapipe>=0.10.0,<0.11.0
+# mediapipe 0.10.30 dropped the legacy Solutions API (mp.solutions.hands), which
+# this codebase is built on - newer 0.10.x wheels ship only mediapipe.tasks and
+# import as a package without `solutions`. 0.10.21 is the last release that has
+# it, so the upper bound must stay below 0.10.22.
+mediapipe>=0.10.14,<0.10.22
+
+# Imported directly by src/detection/pose_detector.py (MessageToDict). Supplied
+# transitively by mediapipe<=0.10.21, declared here because we import it.
+protobuf>=3.20,<5
+
 numpy>=1.19.5,<1.27
 scipy>=1.5.4,<2.0
 opencv-contrib-python>=4.5.5.64,<5.0.0
 pyglet>=1.5.0,<3.0.0
 
-# Optional: pygame for headless audio (Raspberry Pi without X11)
-# Install with: pip install pygame
+# Audio fallback used when pyglet cannot reach a display (Raspberry Pi without
+# X11). src/audio/audio.py imports it lazily, so the app runs without it, but
+# headless deployments need it present.
 pygame>=2.0.0

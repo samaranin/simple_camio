@@ -51,19 +51,15 @@ simple_camio/
 │
 ├── models/                        # Map configurations & assets
 │   ├── tap_model.json            # Trained tap classifier model
-│   ├── UkraineMap/               # Example map: Ukraine
-│   ├── RivneMap/                 # Example map: Rivne
-│   └── TestDemo/                 # Test/demo map
+│   ├── UkraineMap/               # Example map: central Kyiv
+│   ├── CnapMap/                  # Example map: CNAP first floor
+│   └── Heart/                    # Example model: anatomical heart
 │
 ├── data/                         # Runtime data
 │   └── tap_dataset/              # Collected tap training data
 │
-├── tests/                        # Unit tests (future)
-│   └── __init__.py
-│
-└── legacy/                       # Legacy compatibility files
-    ├── simple_camio_2d.py       # Old 2D compatibility layer
-    └── simple_camio_mp.py       # Old MediaPipe compatibility layer
+└── tests/                        # Unit tests (future)
+    └── __init__.py
 ```
 
 ## Top-level Flow
@@ -80,9 +76,10 @@ simple_camio/
    - `capture_and_preprocess()` - Captures and converts frames
    - `get_pose_results()` - Retrieves latest pose data from worker
    - `process_map_detection()` - Handles map tracking and gesture processing
+   - `update_sleep_mode()` - Switches between active and low-power capture rate
    - `handle_display_and_input()` - Manages display and keyboard input
    - `update_performance_stats()` - Logs performance metrics
-6. `cleanup()` performs a graceful shutdown: stop workers, stop display thread, pause ambient sounds, release camera.
+6. `cleanup()` performs a graceful shutdown: stop workers, stop display thread, pause ambient sounds, release camera. It runs on `q`/`ESC`, on `SIGINT`, and on `SIGTERM` (the signal systemd uses to stop the service).
 
 ## Module Descriptions
 
@@ -91,7 +88,7 @@ simple_camio/
 Centralized configuration module at the src root for easy importing.
 
 Main configuration classes:
-- `CameraConfig` - Camera settings (resolution, buffer, processing scale, threaded capture/display)
+- `CameraConfig` - Camera settings (resolution, buffer, processing scale, threaded capture/display, sleep-mode rate, headless flag)
 - `MovementFilterConfig` - Movement smoothing parameters
 - `GestureDetectorConfig` - Gesture detection thresholds
 - `TapDetectionConfig` - Comprehensive tap detection parameters
@@ -210,12 +207,28 @@ Key functions and responsibilities:
 - **AudioWorker**: Single-threaded audio command processing to avoid blocking I/O.
 - Queues for pose and SIFT use `WorkerConfig.POSE_QUEUE_MAXSIZE` and `SIFT_QUEUE_MAXSIZE` (defaults are 1) to keep only the latest frame and avoid backlog.
 - **Frame skipping**: `CameraConfig.DISPLAY_FRAME_SKIP` controls how often frames are displayed (less critical when using DisplayThread).
+- **Low-power sleep**: `update_sleep_mode()` drops capture and the main loop from `CameraConfig.TARGET_FPS` to `SLEEP_FPS` (1) once the map is tracked and no valid gesture has been seen for `SLEEP_AFTER_SECONDS` (15). Sleep is deliberately withheld while the map is still being searched for, so SIFT keeps getting frequent full-quality frames. Any valid gesture wakes it back to the active rate, which costs up to one sleep-frame of latency.
+- **Main-loop throttle**: after each iteration the loop sleeps out the remainder of `1 / target_fps`, so an idle system does not spin a core at full speed.
+- **Headless mode**: `--headless` (or `CameraConfig.HEADLESS`) skips display and keyboard handling entirely - no window, no `DisplayThread`. Audio still goes through pyglet, which wants a display connection, so a daemon is normally launched under `xvfb-run` or with `DISPLAY` set.
 
 ## Runtime Controls and Keys
 
 - `h` — Force map re-detection (calls `SIFTWorker.trigger_redetect()`)
 - `b` — Toggle zone blip sounds
 - `q` or `ESC` — Quit application
+
+Keys are read only when a window exists. Under `--headless` the only way out is
+a signal: `SIGINT` (Ctrl+C) or `SIGTERM`. Both set the shared stop event, so the
+loop unwinds through `cleanup()` rather than being killed mid-frame.
+
+## Command-Line Options
+
+- `--input1 <path>` — Map configuration JSON (default `models/UkraineMap/UkraineMap.json`)
+- `--headless` — Run without a display window
+- `--camera <port>` — Use this camera port and skip auto-detection. Detection probes
+  ports until three consecutive failures, and one USB webcam often exposes two
+  `/dev/video` nodes; with several candidates and no terminal attached there is
+  nobody to answer the prompt, so unattended runs should always pass this.
 
 ## Logging
 

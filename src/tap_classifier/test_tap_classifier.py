@@ -6,11 +6,17 @@ in the pose detector without errors.
 """
 
 import numpy as np
-from tap_classifier.tap_classifier import TapClassifier
+from pathlib import Path
+from src.tap_classifier.tap_classifier import TapClassifier
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Relative to the repository root, which is where these tests are run from.
+# This used to read '../models/tap_model.json', a path outside the repo, so
+# every classifier under test silently fell back to its default weights.
+MODEL_PATH = 'models/tap_model.json'
 
 
 def test_classifier_basic():
@@ -18,7 +24,11 @@ def test_classifier_basic():
     logger.info("Testing basic classifier functionality...")
 
     # Initialize classifier
-    classifier = TapClassifier(model_path='../models/tap_model.json')
+    assert Path(MODEL_PATH).is_file(), f"missing trained model: {MODEL_PATH}"
+    classifier = TapClassifier(model_path=MODEL_PATH)
+    assert classifier.num_updates > 0, (
+        f"{MODEL_PATH} did not load - the test would run on default weights"
+    )
 
     # Create synthetic features for a good tap
     good_tap_features = np.array([
@@ -78,7 +88,7 @@ def test_classifier_training():
     """Test online learning."""
     logger.info("\nTesting online learning...")
 
-    classifier = TapClassifier(model_path='../models/tap_model.json')
+    classifier = TapClassifier(model_path=MODEL_PATH)
 
     # Create a training example
     features = np.random.rand(18)
@@ -98,7 +108,7 @@ def test_feature_importance():
     """Test feature importance extraction."""
     logger.info("\nTesting feature importance...")
 
-    classifier = TapClassifier(model_path='../models/tap_model.json')
+    classifier = TapClassifier(model_path=MODEL_PATH)
 
     importance = classifier.get_feature_importance()
 
@@ -115,11 +125,14 @@ def test_pose_detector_integration():
     logger.info("\nTesting pose detector integration...")
 
     try:
-        from pose_detector import PoseDetectorMPEnhanced
+        from src.detection.pose_detector import PoseDetectorMPEnhanced
 
-        # Create dummy model config
+        # Minimal model config. The zone map must exist, otherwise imread
+        # silently yields None and the test passes over a broken fixture.
+        zone_map = 'models/UkraineMap/UkraineMap.png'
+        assert Path(zone_map).is_file(), f"missing test fixture: {zone_map}"
         model = {
-            'filename': 'models/TestDemo/map.png',
+            'filename': zone_map,
             'zones': []
         }
 

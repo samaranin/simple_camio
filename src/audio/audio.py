@@ -5,9 +5,14 @@ This module handles all audio-related functionality including ambient sounds,
 sound effects, and zone-based audio descriptions.
 
 HEADLESS MODE SUPPORT:
-For Raspberry Pi or other headless systems without X11, this module will
-automatically fall back to pygame for audio playback if pyglet fails.
-Pygame doesn't require X11 display for audio operations.
+For Raspberry Pi or other headless systems without X11, this module falls back
+to pygame, which needs no display for audio.
+
+pyglet is preferred when available, but pyglet.media cannot be imported without
+a display: it pulls in pyglet.gl, which creates a shadow window. So the display
+is probed first and pyglet.media is left unimported when there is none -
+importing it and catching the failure also works, but leaves behind an atexit
+hook that raises the same error again during interpreter shutdown.
 """
 
 import os
@@ -16,47 +21,65 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Try to import pyglet first, fall back to pygame if it fails
+# Backend selection: pyglet when a display is reachable, else pygame.
 AUDIO_BACKEND = None
 USE_PYGLET = False
 USE_PYGAME = False
 
-# Attempt to import and initialize pyglet
-try:
-    # Set DISPLAY if not present (some systems can play audio without actual display)
-    if 'DISPLAY' not in os.environ:
-        os.environ['DISPLAY'] = ':0'
-        logger.info("Set DISPLAY=:0 for pyglet audio")
-    
-    import pyglet.media
-    USE_PYGLET = True
-    AUDIO_BACKEND = 'pyglet'
-    logger.info("Audio backend: pyglet")
-except Exception as e:
-    logger.warning(f"Failed to initialize pyglet: {e}")
-    logger.info("Attempting to use pygame as audio backend...")
-    
-    # Fall back to pygame
+
+def _display_reachable():
+    """
+    Whether pyglet can open a display, which its media stack requires.
+
+    Probed via pyglet.display, which is cheap and creates no window, so
+    pyglet.media stays unimported when the answer is no. DISPLAY is read, never
+    written: setting it here would change the whole process's environment as a
+    side effect of importing this module.
+    """
+    try:
+        import pyglet.display
+        pyglet.display.get_display()
+        return True
+    except Exception as e:
+        logger.info(f"No display available for pyglet ({e})")
+        return False
+
+
+def _init_pygame():
+    """Initialize the pygame mixer. Returns True on success."""
+    global USE_PYGAME, AUDIO_BACKEND
     try:
         import pygame
-        # Initialize pygame mixer for audio only
+        # Audio only - no display, no video subsystem.
         pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=512)
         pygame.mixer.init()
         USE_PYGAME = True
         AUDIO_BACKEND = 'pygame'
         logger.info("Audio backend: pygame (headless compatible)")
-    except Exception as e2:
-        logger.error(f"Failed to initialize pygame: {e2}")
-        logger.error("No audio backend available! Audio will not work.")
-        logger.error("For headless operation, install pygame: pip install pygame")
-        AUDIO_BACKEND = None
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize pygame: {e}")
+        return False
+
+
+if _display_reachable():
+    try:
+        import pyglet.media
+        USE_PYGLET = True
+        AUDIO_BACKEND = 'pyglet'
+        logger.info("Audio backend: pyglet")
+    except Exception as e:
+        logger.warning(f"Display is reachable but pyglet.media failed to load: {e}")
+        _init_pygame()
+else:
+    _init_pygame()
 
 if AUDIO_BACKEND is None:
-    logger.warning("="*60)
-    logger.warning("WARNING: No audio backend available!")
+    logger.warning("=" * 60)
+    logger.warning("WARNING: No audio backend available! Audio will not work.")
     logger.warning("Install pygame for headless audio: pip install pygame")
-    logger.warning("Or run with xvfb: xvfb-run python simple_camio.py --headless")
-    logger.warning("="*60)
+    logger.warning("Or provide a display: xvfb-run python simple_camio.py --headless")
+    logger.warning("=" * 60)
 
 
 class AmbientSoundPlayer:

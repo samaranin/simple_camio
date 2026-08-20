@@ -52,27 +52,63 @@ def list_camera_ports():
     return available_ports, working_ports, non_working_ports
 
 
-def select_camera_port():
+def _stdin_is_interactive():
+    """True only when stdin is a terminal that can actually answer a prompt."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def select_camera_port(preferred_port=None):
     """
-    Automatically select or prompt user to select a camera port.
+    Select a camera port without ever blocking on input.
+
+    Args:
+        preferred_port (int, optional): Port to use as-is, skipping detection.
+            Pass this (via --camera) for unattended and daemon runs.
 
     Returns:
         int: Selected camera port number
     """
+    if preferred_port is not None:
+        logger.info(f"Using camera port {preferred_port} (explicitly requested)")
+        return preferred_port
+
     available_ports, working_ports, non_working_ports = list_camera_ports()
+
+    if not working_ports:
+        logger.warning("No working cameras detected, using default port 0")
+        return 0
 
     if len(working_ports) == 1:
         logger.info(f"Auto-selected camera port {working_ports[0][0]}")
         return working_ports[0][0]
-    elif len(working_ports) > 1:
-        print("The following cameras were detected:")
-        for i in range(len(working_ports)):
-            print(f'{i}) Port {working_ports[i][0]}: {working_ports[i][1]} x {working_ports[i][2]}')
-        cam_selection = input("Please select which camera you would like to use: ")
-        return working_ports[int(cam_selection)][0]
-    else:
-        logger.warning("No working cameras detected, using default port 0")
-        return 0
+
+    for i, (port, height, width) in enumerate(working_ports):
+        logger.info(f"Camera {i}) Port {port}: {height} x {width}")
+
+    # Only a real terminal may be asked to choose. Under a daemon stdin is
+    # /dev/null, and one USB camera often registers as two /dev/video nodes,
+    # so prompting here used to hang the service forever with nothing logged.
+    if not _stdin_is_interactive():
+        port = working_ports[0][0]
+        logger.warning(
+            f"{len(working_ports)} cameras detected but stdin is not interactive; "
+            f"using port {port}. Pass --camera to choose explicitly."
+        )
+        return port
+
+    print("The following cameras were detected:")
+    for i, (port, height, width) in enumerate(working_ports):
+        print(f'{i}) Port {port}: {height} x {width}')
+    try:
+        selection = int(input("Please select which camera you would like to use: "))
+        return working_ports[selection][0]
+    except (EOFError, KeyboardInterrupt, ValueError, IndexError) as e:
+        port = working_ports[0][0]
+        logger.warning(f"Invalid camera selection ({e!r}); falling back to port {port}")
+        return port
 
 
 # ==================== File Loading ====================
@@ -88,21 +124,28 @@ def load_map_parameters(filename):
         dict: Map model parameters
 
     Raises:
-        SystemExit: If file not found or invalid
+        SystemExit: If the file is missing, unreadable, or has no "model" section
     """
-    if os.path.isfile(filename):
+    # Every failure below exits instead of waiting on stdin: under systemd that
+    # wait never returns and the service hangs without logging a reason.
+    if not os.path.isfile(filename):
+        logger.error(f"No map parameters file found at {filename}")
+        logger.error("Usage: simple_camio.py --input1 <filename>")
+        sys.exit(1)
+
+    try:
         with open(filename, 'r') as f:
             map_params = json.load(f)
-            logger.info(f"Loaded map parameters from {filename}")
-            return map_params['model']
-    else:
-        logger.error(f"No map parameters file found at {filename}")
-        print("No map parameters file found at " + filename)
-        print("Usage: simple_camio.exe --input1 <filename>")
-        print(" ")
-        print("Press any key to exit.")
-        _ = sys.stdin.read(1)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Could not read map parameters from {filename}: {e}")
         sys.exit(1)
+
+    if 'model' not in map_params:
+        logger.error(f"Map parameters in {filename} have no 'model' section")
+        sys.exit(1)
+
+    logger.info(f"Loaded map parameters from {filename}")
+    return map_params['model']
 
 
 # ==================== Drawing Functions ====================

@@ -11,22 +11,22 @@ This script provides utilities to:
 
 USAGE:
     # Generate synthetic training data and train
-    python train_tap_classifier.py --train --samples 1000
+    python -m src.tap_classifier.train_tap_classifier --train --samples 1000
 
     # Evaluate trained model
-    python train_tap_classifier.py --evaluate
+    python -m src.tap_classifier.train_tap_classifier --evaluate
 
     # Show feature importance
-    python train_tap_classifier.py --feature-importance
+    python -m src.tap_classifier.train_tap_classifier --feature-importance
 
     # Train with custom parameters
-    python train_tap_classifier.py --train --samples 2000 --learning-rate 0.02 --epochs 5
+    python -m src.tap_classifier.train_tap_classifier --train --samples 2000 --learning-rate 0.02 --epochs 5
     
     # Train from collected real-world data
-    python train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset
+    python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset
 
 COLLECTING REAL-WORLD DATA:
-    1. Enable data collection in config.py:
+    1. Enable data collection in src/config.py:
        TapDetectionConfig.COLLECT_TAP_DATA = True
     
     2. Run the program and use it normally:
@@ -40,10 +40,10 @@ COLLECTING REAL-WORLD DATA:
        data/tap_dataset/tap_data_<timestamp>.json
     
     5. Train the classifier on your collected data:
-       python train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset
+       python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset
     
     6. Optionally merge multiple sessions:
-       python train_tap_classifier.py --merge-datasets --data-dir ../data/tap_dataset --output merged_data.json
+       python -m src.tap_classifier.train_tap_classifier --merge-datasets --data-dir data/tap_dataset --output merged_data.json
     
     7. The trained model will be more accurate for your specific usage patterns!
 
@@ -54,18 +54,12 @@ TIPS FOR COLLECTING GOOD DATA:
     - Try taps while hand is moving slightly
     - The more diverse your collected data, the better the classifier will generalize
 """
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]  # one level up from tap_classifier/
-sys.path.insert(0, str(PROJECT_ROOT))
-
 import numpy as np
 import argparse
 import logging
 import json
 from pathlib import Path
-from tap_classifier.tap_classifier import TapClassifier
+from src.tap_classifier.tap_classifier import TapClassifier
 from src.config import TapDetectionConfig
 
 logging.basicConfig(level=logging.INFO)
@@ -394,7 +388,7 @@ def load_collected_data(data_dir):
 
 
 def train_from_collected_data(data_dir, learning_rate=0.01, epochs=10,
-                              model_path='models/tap_model.json'):
+                              model_path='models/tap_model.json', resume=False):
     """
     Train classifier on collected real-world data.
     
@@ -402,7 +396,9 @@ def train_from_collected_data(data_dir, learning_rate=0.01, epochs=10,
         data_dir (str): Directory containing collected data
         learning_rate (float): Learning rate
         epochs (int): Training epochs
-        model_path (str): Path to save model
+        model_path (str): Path to save model, and to load from when resuming
+        resume (bool): Continue training the model already at model_path
+            instead of starting from the built-in default weights
     """
     logger.info("Training from collected data...")
     
@@ -413,8 +409,18 @@ def train_from_collected_data(data_dir, learning_rate=0.01, epochs=10,
         logger.error("No data to train on")
         return None
     
-    # Initialize classifier
-    classifier = TapClassifier(learning_rate=learning_rate)
+    # Initialize classifier. Without --resume this starts from the built-in
+    # default weights and the save below replaces whatever is at model_path,
+    # so say which of the two is happening rather than leaving it implicit.
+    if resume:
+        classifier = TapClassifier(model_path=model_path, learning_rate=learning_rate)
+        logger.info(f"Resuming from {model_path} ({classifier.num_updates} updates so far)")
+    else:
+        classifier = TapClassifier(learning_rate=learning_rate)
+        logger.info("Starting from default weights (pass --resume to continue "
+                    f"training the model at {model_path} instead)")
+        if Path(model_path).exists():
+            logger.warning(f"{model_path} will be overwritten on save")
     
     # Train
     logger.info(f"\nTraining classifier for {epochs} epochs...")
@@ -488,29 +494,6 @@ def merge_datasets(data_dir, output_file):
         return False
 
 
-def show_feature_importance(model_path='models/tap_model.json'):
-    """
-    Display feature importance from trained model.
-
-    Args:
-        model_path (str): Path to trained model
-    """
-    logger.info("Loading model for feature importance analysis...")
-
-    # Load classifier
-    classifier = TapClassifier(model_path=model_path)
-
-    # Get feature importance
-    importance = classifier.get_feature_importance()
-
-    logger.info("\nFeature Importance (normalized):")
-    logger.info("=" * 50)
-
-    for i, (feature_name, score) in enumerate(importance.items(), 1):
-        bar = "█" * int(score * 50)
-        logger.info(f"{i:2d}. {feature_name:20s} {bar} {score:.4f}")
-
-
 def main():
     """Main entry point for training script."""
     parser = argparse.ArgumentParser(description='Train and evaluate TapClassifier')
@@ -519,6 +502,9 @@ def main():
                        help='Train the classifier on synthetic data')
     parser.add_argument('--train-from-collected', action='store_true',
                        help='Train the classifier on collected real-world data')
+    parser.add_argument('--resume', action='store_true',
+                       help='With --train-from-collected, continue training the existing '
+                            'model at --model-path instead of starting from default weights')
     parser.add_argument('--merge-datasets', action='store_true',
                        help='Merge multiple collected data files into one')
     parser.add_argument('--evaluate', action='store_true',
@@ -535,8 +521,8 @@ def main():
                        help='Number of training epochs (default: 10)')
     parser.add_argument('--model-path', type=str, default='models/tap_model.json',
                        help='Path to model file (default: models/tap_model.json)')
-    parser.add_argument('--data-dir', type=str, default='../data/tap_dataset',
-                       help='Directory containing collected data (default: ../data/tap_dataset)')
+    parser.add_argument('--data-dir', type=str, default='data/tap_dataset',
+                       help='Directory containing collected data (default: data/tap_dataset)')
     parser.add_argument('--output', type=str, default='merged_tap_data.json',
                        help='Output file for merged datasets (default: merged_tap_data.json)')
 
@@ -559,7 +545,8 @@ def main():
             data_dir=args.data_dir,
             learning_rate=args.learning_rate,
             epochs=args.epochs,
-            model_path=args.model_path
+            model_path=args.model_path,
+            resume=args.resume
         )
     
     if args.merge_datasets:
@@ -583,15 +570,15 @@ def main():
         parser.print_help()
         print("\nExample usage:")
         print("  # Train on synthetic data:")
-        print("  python train_tap_classifier.py --train --samples 1000")
+        print("  python -m src.tap_classifier.train_tap_classifier --train --samples 1000")
         print("\n  # Train on collected real-world data:")
-        print("  python train_tap_classifier.py --train-from-collected --data-dir ../data/tap_dataset")
+        print("  python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset")
         print("\n  # Merge collected datasets:")
-        print("  python train_tap_classifier.py --merge-datasets --data-dir ../data/tap_dataset --output merged.json")
+        print("  python -m src.tap_classifier.train_tap_classifier --merge-datasets --data-dir data/tap_dataset --output merged.json")
         print("\n  # Evaluate trained model:")
-        print("  python train_tap_classifier.py --evaluate")
+        print("  python -m src.tap_classifier.train_tap_classifier --evaluate")
         print("\n  # Show feature importance:")
-        print("  python train_tap_classifier.py --feature-importance")
+        print("  python -m src.tap_classifier.train_tap_classifier --feature-importance")
 
 
 if __name__ == '__main__':

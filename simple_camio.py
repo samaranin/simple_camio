@@ -15,6 +15,13 @@ import signal
 import logging
 import numpy as np  # moved to top to avoid per-call imports
 
+# Configured before importing src.*, so log records those modules emit while
+# being imported (such as the audio backend that got selected) are not dropped.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 # Import from new modular structure
 from src.config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetectionConfig
 from src.core.utils import select_camera_port, load_map_parameters, is_gesture_valid
@@ -27,23 +34,20 @@ from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
 from src.core.display_thread import DisplayThread
 from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 # Reusable identity homography to avoid per-frame allocations
 IDENTITY_3 = np.eye(3, dtype=float)
 
 
-def initialize_system(model_path):
+def initialize_system(model_path, cam_port=None):
     """
     Initialize all system components.
 
     Args:
         model_path (str): Path to the map configuration JSON file
+        cam_port (int, optional): Camera port to use. When given, camera
+            auto-detection is skipped entirely (required for daemon runs).
 
     Returns:
         dict: Dictionary containing all initialized components
@@ -54,7 +58,7 @@ def initialize_system(model_path):
     model = load_map_parameters(model_path)
 
     # Select camera
-    cam_port = select_camera_port()
+    cam_port = select_camera_port(cam_port)
 
     # Initialize components based on model type
     if model["modelType"] == "sift_2d_mediapipe":
@@ -159,10 +163,14 @@ def setup_signal_handler(stop_event):
         stop_event (threading.Event): Event to signal on interrupt
     """
     def signal_handler(sig, frame):
-        logger.info("Signal received, shutting down...")
+        logger.info(f"Signal {signal.Signals(sig).name} received, shutting down...")
         stop_event.set()
 
     signal.signal(signal.SIGINT, signal_handler)
+    # systemd stops a service with SIGTERM. Without this the default handler
+    # killed the process mid-frame, so cleanup() never ran: no camera release,
+    # no worker join, no goodbye audio.
+    signal.signal(signal.SIGTERM, signal_handler)
 
 
 def feed_worker_queues(frame, gray, workers, model_detector):
@@ -862,6 +870,10 @@ if __name__ == "__main__":
                        default='models/UkraineMap/UkraineMap.json')
     parser.add_argument('--headless', action='store_true',
                        help='Run in headless mode (no display window) - useful for Raspberry Pi daemon mode')
+    parser.add_argument('--camera', type=int, default=None, metavar='PORT',
+                       help='Camera port to use, skipping auto-detection. '
+                            'Recommended for headless/daemon runs, where detecting '
+                            'several cameras would otherwise need an interactive choice.')
     args = parser.parse_args()
 
     # Apply headless mode to configuration if specified
@@ -873,7 +885,7 @@ if __name__ == "__main__":
     cv.setNumThreads(2)
 
     # Initialize system
-    components = initialize_system(args.input1)
+    components = initialize_system(args.input1, cam_port=args.camera)
     cap = setup_camera(components['cam_port'])
 
     # Setup shutdown handling

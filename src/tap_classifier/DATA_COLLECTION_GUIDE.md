@@ -16,14 +16,14 @@ By training the classifier on your collected data, you can significantly improve
 
 ### 1. Enable Data Collection
 
-Edit `config.py` and set:
+Edit `src/config.py` and set:
 
 ```python
 class TapDetectionConfig:
     # ... other settings ...
 
     COLLECT_TAP_DATA = True  # Enable data collection
-    TAP_DATA_DIR = '../data/tap_dataset'  # Where to save data
+    TAP_DATA_DIR = 'data/tap_dataset'  # Where to save data
     MAX_COLLECTED_SAMPLES = 10000  # Max samples per session
 ```
 
@@ -63,13 +63,25 @@ Tap data saved to data/tap_dataset/tap_data_20251027_143022.json
 Train on your collected data from the project root:
 
 ```powershell
-python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir data/tap_dataset
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset
 ```
 
 This will:
 - Load all collected data files
-- Train the classifier on your real-world examples
-- Save the trained model to `models/tap_model.json`
+- Train the classifier on your real-world examples, starting from the built-in
+  default weights
+- **Replace** the model at `models/tap_model.json`
+
+To keep what the existing model has already learned and add your data on top of
+it, pass `--resume`:
+
+```powershell
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --resume --data-dir data/tap_dataset
+```
+
+Either way the run reports which starting point it used, and warns before
+overwriting an existing model. Use `--model-path` to write somewhere else if you
+want to compare the two.
 - Display performance metrics
 
 ### 5. Use Your Trained Model
@@ -83,13 +95,13 @@ The next time you run Simple CamIO, it will automatically use your trained model
 If you've collected data across multiple sessions:
 
 ```powershell
-python tap_classifier/train_tap_classifier.py --merge-datasets --data-dir data/tap_dataset --output merged_data.json
+python -m src.tap_classifier.train_tap_classifier --merge-datasets --data-dir data/tap_dataset --output merged_data.json
 ```
 
 Then train on the merged dataset:
 
 ```powershell
-python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir data/tap_dataset --epochs 15
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset --epochs 15
 ```
 
 ### Evaluate Model Performance
@@ -97,7 +109,7 @@ python tap_classifier/train_tap_classifier.py --train-from-collected --data-dir 
 Check how well your trained model performs:
 
 ```powershell
-python tap_classifier/train_tap_classifier.py --evaluate --model-path models/tap_model.json
+python -m src.tap_classifier.train_tap_classifier --evaluate --model-path models/tap_model.json
 ```
 
 ### View Feature Importance
@@ -105,7 +117,7 @@ python tap_classifier/train_tap_classifier.py --evaluate --model-path models/tap
 See which features are most important for tap detection:
 
 ```powershell
-python tap_classifier/train_tap_classifier.py --feature-importance
+python -m src.tap_classifier.train_tap_classifier --feature-importance
 ```
 
 ### Combine Synthetic and Real Data
@@ -114,10 +126,10 @@ For best results, you can train on both synthetic and collected data:
 
 ```powershell
 # First train on synthetic data
-python tap_classifier/train_tap_classifier.py --train --samples 2000 --epochs 10
+python -m src.tap_classifier.train_tap_classifier --train --samples 2000 --epochs 10
 
 # Then fine-tune on your collected data
-python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.005 --epochs 5
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --learning-rate 0.005 --epochs 5
 ```
 
 ## Data Collection Details
@@ -212,13 +224,13 @@ This helps you track balance between positive and negative examples.
 
 ```powershell
 # Conservative training (stable, safe)
-python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.005 --epochs 20
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --learning-rate 0.005 --epochs 20
 
 # Aggressive training (fast, may overfit)
-python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.02 --epochs 5
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --learning-rate 0.02 --epochs 5
 
 # Balanced (recommended)
-python tap_classifier/train_tap_classifier.py --train-from-collected --learning-rate 0.01 --epochs 10
+python -m src.tap_classifier.train_tap_classifier --train-from-collected --learning-rate 0.01 --epochs 10
 ```
 
 ## Troubleshooting
@@ -284,7 +296,7 @@ Data collection has negligible performance impact (<1ms per frame). If the progr
 You can also export to CSV for analysis in other tools:
 
 ```python
-from tap_classifier.tap_data_collector import TapDataCollector
+from src.tap_classifier.tap_data_collector import TapDataCollector
 
 collector = TapDataCollector()
 collector.load_from_json('data/tap_dataset/tap_data_20251027_143022.json')
@@ -293,7 +305,7 @@ collector.save_csv('tap_data.csv')
 
 ## Configuration Reference
 
-All settings in `config.py` under `TapDetectionConfig`:
+All settings in `src/config.py` under `TapDetectionConfig`:
 
 ```python
 # Enable/disable collection
@@ -339,7 +351,7 @@ When using `CombinedPoseDetector` (default), data is collected from whichever de
 
 ## See Also
 
-- `tap_classifier/TAP_CLASSIFIER_README.md` - Classifier architecture details
+- `src/tap_classifier/TAP_CLASSIFIER_README.md` - Classifier architecture details
 - `ARCHITECTURE.md` - System architecture and data flow
-- `config.py` - All configuration options
+- `src/config.py` - All configuration options
 - `.github/copilot-instructions.md` - Development guidelines

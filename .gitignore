@@ -22,7 +22,9 @@ simple_calibration
 venv/
 
 .idea/
-# Added by code-review-graph
-.code-review-graph/
+# Local agent config
 .claude/
+
+# Added by graphify
+graphify-out/
 

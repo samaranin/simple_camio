@@ -10,7 +10,7 @@ import queue
 import time
 import cv2 as cv
 import logging
-from src.config import WorkerConfig
+from src.config import WorkerConfig, SIFTConfig
 from src.core.utils import normalize_gesture_location
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,9 @@ class SIFTWorker(threading.Thread):
         self.lock = lock
         self.running = True
         self.force_redetect = False
-        self.validate_interval = WorkerConfig.SIFT_RETRY_ATTEMPTS
+        # Seconds between validations. This used to read SIFT_RETRY_ATTEMPTS,
+        # an attempt COUNT (3), so validation ran on the wrong cadence.
+        self.validate_interval = SIFTConfig.VALIDATION_INTERVAL
         self._last_validation_ts = 0.0
         self.stop_event = stop_event
 
@@ -300,9 +302,9 @@ class SIFTWorker(threading.Thread):
                     now = time.time()
                     if now - self._last_validation_ts >= self.validate_interval:
                         self._last_validation_ts = now
-                        valid = self.sift_detector.quick_validate_position(
-                            frame, min_matches=6, position_threshold=40
-                        )
+                        # Thresholds default to SIFTConfig.VALIDATION_MIN_MATCHES
+                        # and VALIDATION_POSITION_THRESHOLD.
+                        valid = self.sift_detector.quick_validate_position(frame)
                         if not valid:
                             # Mark stale and proceed to re-detection
                             self.sift_detector.requires_homography = True
