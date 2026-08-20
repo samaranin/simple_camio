@@ -1006,9 +1006,20 @@ def test_cyrillic_is_written_literally_not_escaped():
 
 
 def test_a_value_that_appears_twice_is_refused():
-    text = '{"a":"same", "b":"same"}'
+    """
+    Ambiguity means the SAME key and value twice - two hotspots pointing at one
+    audio file, say. Two different keys sharing a value is not ambiguous, because
+    the needle is the key/value pair, not the value alone.
+    """
+    text = '[{"a":"same"},{"a":"same"}]'
     with pytest.raises(json_edit.JsonEditError, match='2 times'):
         json_edit.replace_string_value(text, 'a', 'same', 'different')
+
+
+def test_two_keys_sharing_a_value_is_not_ambiguous():
+    text = '{"a":"same", "b":"same"}'
+    assert json_edit.replace_string_value(text, 'a', 'same', 'different') == \
+        '{"a":"different", "b":"same"}'
 
 
 def test_a_value_that_is_not_there_is_refused():
@@ -1154,7 +1165,7 @@ def write_verified(path, text, expected_data):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_tts_json_edit.py -v`
-Expected: 9 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Prove it against a real model file**
 
