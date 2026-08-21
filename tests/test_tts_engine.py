@@ -77,7 +77,13 @@ def test_capital_cyrillic_is_lowercased_before_it_reaches_piper(
     engine.synthesize(
         [engine.SynthesisJob(text='Хрещатик', output_path=out)],
         piper_bin=str(stub_piper), voice='test_voice', voices_dir=stub_voice)
-    assert out.with_suffix('.wav.txt').read_text(encoding='utf-8') == 'хрещатик'
+    # The stub's .txt companion is written beside whatever path synthesize()
+    # actually passes as --output_file, which is a temporary path rather than
+    # `out` itself (see the interrupted-synthesis fix) - so it is found by
+    # glob rather than assumed to sit next to the final destination.
+    txt_files = list(tmp_path.glob('*.txt'))
+    assert len(txt_files) == 1, txt_files
+    assert txt_files[0].read_text(encoding='utf-8') == 'хрещатик'
 
 
 def test_progress_is_reported_per_clip(stub_piper, stub_voice, tmp_path):
@@ -127,3 +133,42 @@ def test_a_timed_out_clip_fails_without_stopping_its_sibling(
         jobs, piper_bin=str(stub_piper), voice='test_voice', voices_dir=stub_voice)
     assert [j.output_path.name for j in failed] == ['a.wav']
     assert [j.output_path.name for j in ok] == ['b.wav']
+
+
+def test_an_interrupted_synthesis_never_leaves_a_partial_file_at_the_destination(
+        monkeypatch, stub_piper, stub_voice, tmp_path):
+    """
+    piper creates its --output_file immediately at 0 bytes and only fills it at
+    the end (docs/tts-setup.md: killed at 3, 5, 8 and 12 seconds, always a
+    0-byte file at that point). A power cut or `systemctl stop` mid-synthesis
+    must not leave that 0-byte stub sitting at the path callers treat as "this
+    zone's audio is ready" - that silences the zone forever, since neither a
+    restart nor `generate_audio` without --force repairs an existing file.
+
+    subprocess.run is monkeypatched to reproduce exactly that: it creates a
+    0-byte file at whatever path was passed as --output_file, then raises
+    TimeoutExpired in place of the killed process. If synthesize() still
+    passes the real destination as --output_file, that destination is left
+    holding the 0-byte stub. The fix must route piper's writes through a
+    temporary path instead, so the destination is only ever touched by an
+    atomic replace on success.
+    """
+    out = tmp_path / 'a.wav'
+
+    def killed_mid_write(command, *, input, **kwargs):
+        idx = command.index('--output_file')
+        target = Path(command[idx + 1])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'')  # what a killed piper process leaves behind
+        raise engine.subprocess.TimeoutExpired(cmd=command, timeout=1)
+
+    monkeypatch.setattr(engine.subprocess, 'run', killed_mid_write)
+
+    ok, failed = engine.synthesize(
+        [engine.SynthesisJob(text='Хрещатик', output_path=out)],
+        piper_bin=str(stub_piper), voice='test_voice', voices_dir=stub_voice)
+
+    assert [j.output_path.name for j in failed] == ['a.wav']
+    assert ok == []
+    assert not out.exists(), \
+        'an interrupted run must never leave a partial file at the destination'

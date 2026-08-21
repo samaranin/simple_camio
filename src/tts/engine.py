@@ -8,6 +8,7 @@ dependency stays at arm's length behind a process boundary.
 """
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -140,7 +141,13 @@ def synthesize(jobs, *, piper_bin=None, voice=None, voices_dir=None, progress=No
     succeeded, failed = [], []
     for job in jobs:
         job.output_path.parent.mkdir(parents=True, exist_ok=True)
-        command = [piper, '--model', str(onnx), '--output_file', str(job.output_path)]
+        # piper creates --output_file immediately, at 0 bytes, and only fills it
+        # once synthesis completes. Pointing it at a temporary path and moving
+        # the result into place on success only means a run interrupted by a
+        # power cut or `systemctl stop` can never leave a partial file sitting
+        # at the path callers treat as "this clip is ready".
+        tmp_path = job.output_path.with_name(job.output_path.name + '.tmp')
+        command = [piper, '--model', str(onnx), '--output_file', str(tmp_path)]
         try:
             result = subprocess.run(
                 command,
@@ -151,20 +158,31 @@ def synthesize(jobs, *, piper_bin=None, voice=None, voices_dir=None, progress=No
             )
         except (OSError, subprocess.TimeoutExpired) as e:
             logger.error(f"piper failed for {job.output_path.name}: {e}")
+            _discard(tmp_path)
             failed.append(job)
             continue
 
-        if result.returncode != 0 or not job.output_path.is_file():
+        if result.returncode != 0 or not tmp_path.is_file():
             detail = (result.stderr or '').strip()[:200]
             logger.error(
                 f"piper failed for {job.output_path.name} "
                 f"(exit {result.returncode}): {detail}"
             )
+            _discard(tmp_path)
             failed.append(job)
             continue
 
+        os.replace(tmp_path, job.output_path)
         succeeded.append(job)
         if progress:
             progress(len(succeeded) + len(failed), len(jobs), job)
 
     return succeeded, failed
+
+
+def _discard(path):
+    """Remove a leftover temporary file from a failed synthesis attempt."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass

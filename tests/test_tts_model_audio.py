@@ -56,7 +56,7 @@ def test_pending_skips_entries_with_no_text():
 def test_pending_skips_output_that_already_exists(tmp_path):
     target = tmp_path / 'audio' / 'tts' / 'one.wav'
     target.parent.mkdir(parents=True)
-    target.write_bytes(b'already here')
+    target.write_bytes(b'a real clip, well past the minimum valid WAV size')
     entries = [model_audio.NarrationEntry(
         'hotspot', 0, 'Хрещатик', str(tmp_path / 'audio' / 'one.mp3'))]
     assert model_audio.pending(entries) == []
@@ -65,13 +65,30 @@ def test_pending_skips_output_that_already_exists(tmp_path):
 def test_force_includes_output_that_already_exists(tmp_path):
     target = tmp_path / 'audio' / 'tts' / 'one.wav'
     target.parent.mkdir(parents=True)
-    target.write_bytes(b'already here')
+    target.write_bytes(b'a real clip, well past the minimum valid WAV size')
     entries = [model_audio.NarrationEntry(
         'hotspot', 0, 'Хрещатик', str(tmp_path / 'audio' / 'one.mp3'))]
     assert len(model_audio.pending(entries, force=True)) == 1
 
 
 def test_pending_includes_missing_output(tmp_path):
+    entries = [model_audio.NarrationEntry(
+        'hotspot', 0, 'Хрещатик', str(tmp_path / 'audio' / 'one.mp3'))]
+    assert len(model_audio.pending(entries)) == 1
+
+
+def test_pending_includes_an_existing_file_too_small_to_be_a_real_wav(tmp_path):
+    """
+    piper creates its --output_file immediately at 0 bytes and fills it only at
+    the end, so a run interrupted by a power cut or `systemctl stop` leaves a
+    0-byte file exactly where a caller expects finished audio. Without this,
+    neither a restart nor a plain `generate_audio` rerun repairs it - the zone
+    stays silent forever. A file smaller than a valid WAV header (44 bytes)
+    must be treated the same as a missing file, so the next run self-heals it.
+    """
+    target = tmp_path / 'audio' / 'tts' / 'one.wav'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'')  # what an interrupted synthesis leaves behind
     entries = [model_audio.NarrationEntry(
         'hotspot', 0, 'Хрещатик', str(tmp_path / 'audio' / 'one.mp3'))]
     assert len(model_audio.pending(entries)) == 1

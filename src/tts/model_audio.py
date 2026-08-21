@@ -57,6 +57,27 @@ def generated_path(audio_path, subdir=None):
 #: Fixed output stem for a model's description, which has no basename of its own.
 MAP_DESCRIPTION_STEM = 'map_description'
 
+#: Minimum size of a real WAV file (the RIFF/fmt header alone is this big).
+#: piper creates its --output_file immediately at 0 bytes and fills it only
+#: when synthesis completes, so a run interrupted by a power cut or
+#: `systemctl stop` can leave a file this small sitting at a path a caller
+#: would otherwise treat as "already generated".
+MIN_VALID_WAV_BYTES = 44
+
+
+def _is_usable(path):
+    """
+    Whether an existing path is large enough to be real audio.
+
+    Anything smaller is a stub left behind by an interrupted synthesis, not a
+    playable clip, and must be treated the same as a missing file so the next
+    run regenerates it instead of leaving the zone silent forever.
+    """
+    try:
+        return path.stat().st_size >= MIN_VALID_WAV_BYTES
+    except OSError:
+        return False
+
 
 def output_path(entry, subdir=None):
     """
@@ -110,12 +131,15 @@ def pending(entries, *, force=False, subdir=None):
     The entries that need synthesizing.
 
     Skips anything with no text or no path. Skips anything whose output already
-    exists unless force is set: existing audio is never replaced by accident.
+    exists and is large enough to be real audio, unless force is set: existing
+    audio is never replaced by accident. An existing file too small to be a
+    valid WAV is treated as missing (see MIN_VALID_WAV_BYTES), so damage from
+    an interrupted run self-heals on the next call.
     """
     result = []
     for entry in entries:
         if not entry.text or not entry.audio_path:
             continue
-        if force or not output_path(entry, subdir).is_file():
+        if force or not _is_usable(output_path(entry, subdir)):
             result.append(entry)
     return result

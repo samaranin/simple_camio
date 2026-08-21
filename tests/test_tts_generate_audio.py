@@ -73,6 +73,25 @@ def test_force_regenerates(sample_model_file, stub_piper, stub_voice, monkeypatc
     assert target.read_bytes() != b'clobbered'
 
 
+def test_a_zero_byte_leftover_from_an_interrupted_run_is_regenerated(
+        sample_model_file, stub_piper, stub_voice, monkeypatch):
+    """
+    A 0-byte WAV is exactly what a killed piper process leaves at its
+    --output_file (docs/tts-setup.md). Without this fix, `pending()` treats
+    that file's mere existence as "already generated" and a plain rerun -
+    without --force - never repairs it, so the zone stays silent forever.
+    """
+    monkeypatch.chdir(sample_model_file.parent)
+    audio_tts = sample_model_file.parent / 'audio' / 'tts'
+    audio_tts.mkdir(parents=True)
+    leftover = audio_tts / 'Khreschatyk.wav'
+    leftover.write_bytes(b'')  # what an interrupted synthesis leaves behind
+
+    failed = _run(sample_model_file, stub_piper, stub_voice)  # no --force
+    assert failed == 0
+    assert leftover.stat().st_size > 0
+
+
 def test_a_failing_clip_is_counted_and_its_path_is_not_rewritten(
         tmp_path, stub_piper, stub_voice, monkeypatch):
     monkeypatch.chdir(tmp_path)
