@@ -225,9 +225,11 @@ audio is produced - existing clips are left alone unless `--force` is passed.
 python -m src.tts.generate_audio --input1 models/UkraineMap/UkraineMap.json
 ```
 
-This requires the `piper-tts` package and a downloaded voice model; see
-[docs/tts-setup.md](docs/tts-setup.md) for installing Piper and fetching the
-`uk_UA-ukrainian_tts-medium` voice used by the bundled maps.
+This requires the `piper-tts` package and a downloaded voice model - install
+with `uv pip install --python .venv/bin/python -r requirements-tts.txt`; it
+is not in `requirements.txt` because it has no wheel for 32-bit Raspberry Pi
+OS. See [docs/tts-setup.md](docs/tts-setup.md) for installing Piper and
+fetching the `uk_UA-ukrainian_tts-medium` voice used by the bundled maps.
 
 The generated WAVs are not committed to the repository - they are build
 output from text that already lives in the model JSON. A map that ships

@@ -18,8 +18,10 @@ pyglet>=1.5.0,<3.0.0
 # headless deployments need it present.
 pygame>=2.0.0
 
-# Text-to-speech for zone narration. GPL-3.0, run as a subprocess - see
-# src/tts/engine.py. Only needed to generate audio, or for the runtime fallback
-# when a map ships without it. Voice models are fetched separately; see
+# Text-to-speech for zone narration (piper-tts) is NOT listed here: it has no
+# 32-bit wheel, and this file must keep installing on every supported device,
+# 32-bit Raspberry Pi OS included. Every map ships with its narration
+# pre-generated, so the application runs fully without it - piper-tts is only
+# needed to (re)generate audio or to enable the runtime fallback for a map
+# that ships without pre-generated clips. See requirements-tts.txt and
 # docs/tts-setup.md.
-piper-tts>=1.7.0,<2.0

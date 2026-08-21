@@ -1,0 +1,19 @@
+# Optional: text-to-speech for zone narration.
+#
+# Not part of requirements.txt because it has no wheel for 32-bit Raspberry Pi
+# OS - an unconditional dependency here would break `pip install -r
+# requirements.txt` for the whole application on that platform, not just
+# narration (see docs/tts-setup.md).
+#
+# Install with:
+#   uv pip install --python .venv/bin/python -r requirements-tts.txt
+#
+# Needed only to (re)generate narration with `python -m src.tts.generate_audio`,
+# or to let ZoneAudioPlayer synthesize on the fly when a map ships without
+# pre-generated audio (TTSConfig.RUNTIME_FALLBACK). A map with its narration
+# already generated (every map in this repository) runs fully without this -
+# the pre-generated WAVs still play.
+#
+# GPL-3.0-or-later, run as a subprocess (src/tts/engine.py) rather than
+# imported, so the license and its ONNX runtime stay at arm's length.
+piper-tts>=1.7.0,<2.0
