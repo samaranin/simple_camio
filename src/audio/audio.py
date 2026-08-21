@@ -186,61 +186,61 @@ class ZoneAudioPlayer:
         self.sound_files = {}
         self.hotspots = {}
         self.enable_blips = False
-        
+
         if USE_PYGLET:
             import pyglet.media
             self.player = pyglet.media.Player()
-            self.welcome_player = None
-            self.goodbye_player = None
-            
-            # Load blip sound for zone transitions
-            self.blip_sound = pyglet.media.load(self.model['blipsound'], streaming=False)
-            
-            # Load map description if available
-            if "map_description" in self.model:
-                self.map_description = pyglet.media.load(self.model['map_description'], streaming=False)
-                self.have_played_description = False
-            else:
-                self.have_played_description = True
-            
-            # Load welcome and goodbye messages
-            self.welcome_message = pyglet.media.load(self.model['welcome_message'], streaming=False)
-            self.goodbye_message = pyglet.media.load(self.model['goodbye_message'], streaming=False)
-            
-        elif USE_PYGAME:
-            import pygame
-            self.player = None
-            self.welcome_player = None
-            self.goodbye_player = None
-            self.current_channel = None  # Track playing channel
-            
-            # Load blip sound
-            self.blip_sound = pygame.mixer.Sound(self.model['blipsound'])
-            
-            # Load map description if available
-            if "map_description" in self.model:
-                self.map_description = pygame.mixer.Sound(self.model['map_description'])
-                self.have_played_description = False
-            else:
-                self.have_played_description = True
-            
-            # Load welcome and goodbye messages
-            self.welcome_message = pygame.mixer.Sound(self.model['welcome_message'])
-            self.goodbye_message = pygame.mixer.Sound(self.model['goodbye_message'])
-            
         else:
-            logger.warning("No audio backend - zone audio player disabled")
             self.player = None
-            self.blip_sound = None
-            self.map_description = None
-            self.welcome_message = None
-            self.goodbye_message = None
-            self.have_played_description = True
+        self.welcome_player = None
+        self.goodbye_player = None
+        self.current_channel = None
+
+        self.blip_sound = self._load_sound(self.model.get('blipsound'), 'blip sound')
+        self.map_description = self._load_sound(
+            self.model.get('map_description'), 'map description')
+        self.have_played_description = self.map_description is None
+        self.welcome_message = self._load_sound(
+            self.model.get('welcome_message'), 'welcome message')
+        self.goodbye_message = self._load_sound(
+            self.model.get('goodbye_message'), 'goodbye message')
 
         # Load audio files for each hotspot
         self._load_hotspot_audio()
 
         logger.info(f"Initialized zone audio player ({AUDIO_BACKEND}) with {len(self.hotspots)} hotspots")
+
+    def _load_sound(self, path, label=None):
+        """
+        Load one audio file with whichever backend is active.
+
+        Args:
+            path (str): Path to the audio file.
+            label (str, optional): Name to use in log messages.
+
+        Returns:
+            The backend's sound object, or None when the path is empty, the file is
+            absent, or no backend is available. Callers must tolerate None: one
+            silent clip is survivable where an exception would end the session.
+        """
+        if not path:
+            return None
+
+        label = label or path
+        if not os.path.exists(path):
+            logger.warning(f"Audio file not found: {path}")
+            return None
+
+        try:
+            if USE_PYGLET:
+                import pyglet.media
+                return pyglet.media.load(path, streaming=False)
+            if USE_PYGAME:
+                import pygame
+                return pygame.mixer.Sound(path)
+        except Exception as e:
+            logger.error(f"Could not load {label}: {e}")
+        return None
 
     def _load_hotspot_audio(self):
         """Load audio files for all hotspots defined in the model."""
@@ -252,19 +252,10 @@ class ZoneAudioPlayer:
 
             self.hotspots[key] = hotspot
 
-            # Load audio file if it exists
-            if os.path.exists(hotspot['audioDescription']):
-                if USE_PYGLET:
-                    import pyglet.media
-                    self.sound_files[key] = pyglet.media.load(
-                        hotspot['audioDescription'],
-                        streaming=False
-                    )
-                elif USE_PYGAME:
-                    import pygame
-                    self.sound_files[key] = pygame.mixer.Sound(hotspot['audioDescription'])
-            else:
-                logger.warning(f"Audio file not found: {hotspot['audioDescription']}")
+            sound = self._load_sound(
+                hotspot.get('audioDescription'), hotspot.get('textDescription'))
+            if sound is not None:
+                self.sound_files[key] = sound
 
     def set_zone_volume(self, volume):
         """
