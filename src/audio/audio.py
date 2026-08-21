@@ -18,7 +18,6 @@ hook that raises the same error again during interpreter shutdown.
 import os
 import sys
 import logging
-from pathlib import Path
 
 from src.config import TTSConfig
 
@@ -220,9 +219,19 @@ class ZoneAudioPlayer:
         Fill in narration audio that is absent, before anything is loaded.
 
         Runs once at construction rather than on demand, so a zone never waits for
-        synthesis while a finger is resting on it. Writes only audio files, at the
-        paths the model already names - a device in the field does not rewrite its
-        own configuration.
+        synthesis while a finger is resting on it. Writes only audio files - a
+        device in the field does not rewrite its own configuration - at whatever
+        destination model_audio.output_path() names, the same module the offline
+        generator CLI uses. For a model whose audioDescription/map_description
+        already point inside model_audio's generated subdirectory (as every model
+        that has already been through the CLI does), that destination is the
+        literal path the JSON names, so nothing changes for them; a model that
+        still names an un-generated path elsewhere (e.g. Audio/X.mp3) gets its
+        clip written under Audio/tts/X.wav instead of as WAV bytes under the
+        literal .mp3 name.
+
+        model_audio.pending() also owns the missing-file test, so this and the
+        CLI cannot drift on what counts as "already generated".
 
         Every failure here is logged and tolerated. The player continues with
         whatever files do exist.
@@ -233,17 +242,14 @@ class ZoneAudioPlayer:
         # Lazy: Piper may not be installed, and that must not stop the app starting.
         from src.tts import engine, model_audio
 
-        pending = [
-            entry for entry in model_audio.narration_entries(self.model)
-            if entry.text and entry.audio_path and not os.path.exists(entry.audio_path)
-        ]
-        if not pending:
+        todo = model_audio.pending(model_audio.narration_entries(self.model))
+        if not todo:
             return
 
-        logger.info(f"{len(pending)} narration clip(s) missing - synthesizing")
+        logger.info(f"{len(todo)} narration clip(s) missing - synthesizing")
         jobs = [
-            engine.SynthesisJob(text=entry.text, output_path=Path(entry.audio_path))
-            for entry in pending
+            engine.SynthesisJob(text=entry.text, output_path=model_audio.output_path(entry))
+            for entry in todo
         ]
 
         def report(done, total, job):
