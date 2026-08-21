@@ -1,5 +1,6 @@
 """Planning is pure, so it is tested with a dict and a tmp_path."""
 
+import json
 from pathlib import Path
 
 from src.tts import model_audio
@@ -74,3 +75,33 @@ def test_pending_includes_missing_output(tmp_path):
     entries = [model_audio.NarrationEntry(
         'hotspot', 0, 'Хрещатик', str(tmp_path / 'audio' / 'one.mp3'))]
     assert len(model_audio.pending(entries)) == 1
+
+
+def test_output_path_keeps_a_hotspots_basename():
+    entry = model_audio.NarrationEntry('hotspot', 0, 'Хрещатик', 'a/Khreschatyk.mp3')
+    assert model_audio.output_path(entry) == Path('a/tts/Khreschatyk.wav')
+
+
+def test_the_map_description_gets_a_fixed_name_not_the_shared_basename():
+    """
+    CnapMap and Heart point map_description at the same file as one of their
+    hotspots, so deriving from the basename would collide.
+    """
+    entry = model_audio.NarrationEntry(
+        'map_description', model_audio.MAP_DESCRIPTION_INDEX, 'Опис', 'a/Aorta.mp3')
+    assert model_audio.output_path(entry) == Path('a/tts/map_description.wav')
+
+
+def test_no_real_model_produces_two_entries_with_one_output_path():
+    """The collision this function exists to prevent, checked on real data."""
+    import glob
+    for path in sorted(glob.glob('models/*/*.json')):
+        with open(path, encoding='utf-8') as f:
+            document = json.load(f)
+        if 'model' not in document:
+            continue
+        model = document['model']
+        model.setdefault('mapDescriptionText', 'опис карти')
+        outs = [str(model_audio.output_path(e))
+                for e in model_audio.narration_entries(model) if e.text]
+        assert len(outs) == len(set(outs)), f'{path}: duplicate output paths'
