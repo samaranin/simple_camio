@@ -18,6 +18,9 @@ hook that raises the same error again during interpreter shutdown.
 import os
 import sys
 import logging
+from pathlib import Path
+
+from src.config import TTSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +199,8 @@ class ZoneAudioPlayer:
         self.goodbye_player = None
         self.current_channel = None
 
+        self._synthesize_missing()
+
         self.blip_sound = self._load_sound(self.model.get('blipsound'), 'blip sound')
         self.map_description = self._load_sound(
             self.model.get('map_description'), 'map description')
@@ -209,6 +214,53 @@ class ZoneAudioPlayer:
         self._load_hotspot_audio()
 
         logger.info(f"Initialized zone audio player ({AUDIO_BACKEND}) with {len(self.hotspots)} hotspots")
+
+    def _synthesize_missing(self):
+        """
+        Fill in narration audio that is absent, before anything is loaded.
+
+        Runs once at construction rather than on demand, so a zone never waits for
+        synthesis while a finger is resting on it. Writes only audio files, at the
+        paths the model already names - a device in the field does not rewrite its
+        own configuration.
+
+        Every failure here is logged and tolerated. The player continues with
+        whatever files do exist.
+        """
+        if not TTSConfig.RUNTIME_FALLBACK:
+            return
+
+        # Lazy: Piper may not be installed, and that must not stop the app starting.
+        from src.tts import engine, model_audio
+
+        pending = [
+            entry for entry in model_audio.narration_entries(self.model)
+            if entry.text and entry.audio_path and not os.path.exists(entry.audio_path)
+        ]
+        if not pending:
+            return
+
+        logger.info(f"{len(pending)} narration clip(s) missing - synthesizing")
+        jobs = [
+            engine.SynthesisJob(text=entry.text, output_path=Path(entry.audio_path))
+            for entry in pending
+        ]
+
+        def report(done, total, job):
+            logger.info(f"synthesizing {done}/{total}: {job.output_path.name}")
+
+        try:
+            _, failed = engine.synthesize(jobs, progress=report)
+        except engine.TTSUnavailable as e:
+            logger.warning(f"Cannot synthesize the missing narration: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Synthesis failed unexpectedly: {e}", exc_info=True)
+            return
+
+        for job in failed:
+            logger.warning(
+                f"No audio for {job.output_path.name}; that zone will stay silent")
 
     def _load_sound(self, path, label=None):
         """
