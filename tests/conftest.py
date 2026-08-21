@@ -1,7 +1,5 @@
 """Fixtures shared by the TTS tests."""
 
-import json
-import os
 import stat
 import textwrap
 

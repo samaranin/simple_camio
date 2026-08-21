@@ -28,6 +28,24 @@ def test_resolve_piper_finds_it_beside_the_interpreter(monkeypatch, tmp_path):
     assert engine.resolve_piper() == str(piper)
 
 
+def test_resolve_piper_accepts_a_bare_name_on_path(monkeypatch):
+    """
+    TTSConfig.PIPER_BIN or an explicit override may name a bare command
+    (e.g. 'piper') rather than a path relative to the cwd - the explicit
+    branch must fall back to a PATH lookup instead of only checking
+    Path(candidate).is_file(), which a bare name never satisfies.
+    """
+    monkeypatch.setattr(
+        engine.shutil, 'which',
+        lambda name: '/usr/local/bin/piper' if name == 'piper' else None)
+    assert engine.resolve_piper('piper') == '/usr/local/bin/piper'
+
+
+def test_resolve_piper_names_the_setup_doc_for_an_explicit_path_too():
+    with pytest.raises(engine.TTSUnavailable, match='docs/tts-setup.md'):
+        engine.resolve_piper('/nonexistent/piper')
+
+
 def test_resolve_voice_names_the_files_it_wanted(tmp_path):
     with pytest.raises(engine.TTSUnavailable, match='uk_UA'):
         engine.resolve_voice(voice='uk_UA-missing', voices_dir=tmp_path)

@@ -68,7 +68,15 @@ def resolve_piper(piper_bin=None):
     if candidate:
         if Path(candidate).is_file():
             return str(candidate)
-        raise TTSUnavailable(f"piper not found at {candidate}")
+        # Also accept a bare command name (e.g. 'piper'), not just a path:
+        # TTSConfig.PIPER_BIN or an explicit argument may name something on
+        # PATH rather than a file that exists relative to the cwd.
+        found = shutil.which(candidate)
+        if found:
+            return found
+        raise TTSUnavailable(
+            f"piper not found at {candidate}. See docs/tts-setup.md."
+        )
 
     # Look beside the running interpreter before consulting PATH. piper installs
     # into .venv/bin/, and this project runs as .venv/bin/python without the venv
@@ -81,8 +89,8 @@ def resolve_piper(piper_bin=None):
     if not found:
         raise TTSUnavailable(
             "piper is not on PATH. Install it with "
-            "'uv pip install piper-tts' or set TTSConfig.PIPER_BIN. "
-            "See docs/tts-setup.md."
+            "'uv pip install -r requirements-tts.txt' or set "
+            "TTSConfig.PIPER_BIN. See docs/tts-setup.md."
         )
     return found
 
