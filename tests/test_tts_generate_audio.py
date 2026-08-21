@@ -171,7 +171,7 @@ def test_the_real_cnap_model_gets_distinct_audio_for_its_shared_source_file(
     hotspot_audio = model['hotspots'][0]['audioDescription']
     description_audio = model['map_description']
 
-    assert model['hotspots'][0]['textDescription'] == 'Passport Services'
+    assert model['hotspots'][0]['textDescription'] == 'Паспортні послуги'
     assert hotspot_audio != description_audio
     assert (tmp_path / hotspot_audio).is_file()
     assert (tmp_path / description_audio).is_file()
