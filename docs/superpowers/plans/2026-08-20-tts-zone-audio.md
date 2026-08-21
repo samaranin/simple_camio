@@ -927,7 +927,7 @@ def pending(entries, *, force=False, subdir=None):
     for entry in entries:
         if not entry.text or not entry.audio_path:
             continue
-        if force or not generated_path(entry.audio_path, subdir).is_file():
+        if force or not output_path(entry, subdir).is_file():
             result.append(entry)
     return result
 ```
@@ -1205,8 +1205,81 @@ git commit -m "feat: add verified, formatting-preserving JSON edits"
 - Create: `src/tts/generate_audio.py`, `tests/test_tts_generate_audio.py`
 
 **Interfaces:**
-- Consumes: `engine.SynthesisJob`, `engine.synthesize`, `engine.TTSUnavailable`, `model_audio.narration_entries`, `model_audio.pending`, `model_audio.generated_path`, `json_edit.replace_string_value`, `json_edit.write_verified`
+- Consumes: `engine.SynthesisJob`, `engine.synthesize`, `engine.TTSUnavailable`, `model_audio.narration_entries`, `model_audio.pending`, `json_edit.replace_string_value`, `json_edit.write_verified`
 - Produces: `generate_audio.generate_for_model(model_path, *, force=False, voice=None, voices_dir=None, piper_bin=None) -> int` returning the number of failed entries; `generate_audio.main(argv=None) -> int`
+- Also adds to `src/tts/model_audio.py`: `MAP_DESCRIPTION_STEM` and
+  `output_path(entry, subdir=None) -> Path` (see Step 0)
+
+- [ ] **Step 0: Give the map description its own output name**
+
+Two of the three real models point `map_description` at the same audio file as one
+of their hotspots — `Passport Services.mp3` in CnapMap, `Aorta.mp3` in Heart. Deriving
+the output name from that shared basename sends two different texts to one file, and
+whichever synthesizes last wins, so a zone gets the wrong narration. Verified against
+the real models; it would only surface once Task 9 populates `mapDescriptionText`.
+
+Add to `src/tts/model_audio.py`, beside `generated_path`:
+
+```python
+#: Fixed output stem for a model's description, which has no basename of its own.
+MAP_DESCRIPTION_STEM = 'map_description'
+
+
+def output_path(entry, subdir=None):
+    """
+    Where this entry's generated WAV belongs.
+
+    A hotspot keeps its source file's basename, so each generated clip stays
+    traceable to the recording it replaces. The map description gets a fixed name
+    instead: two of the three real models point map_description at the same file as
+    one of their hotspots, and deriving from that basename would send two different
+    texts to one output file.
+    """
+    if entry.kind == 'hotspot':
+        return generated_path(entry.audio_path, subdir)
+    parent = Path(entry.audio_path).parent
+    subdir = subdir or TTSConfig.GENERATED_SUBDIR
+    return parent / subdir / f'{MAP_DESCRIPTION_STEM}.wav'
+```
+
+Add to `tests/test_tts_model_audio.py`:
+
+```python
+def test_output_path_keeps_a_hotspots_basename():
+    entry = model_audio.NarrationEntry('hotspot', 0, 'Хрещатик', 'a/Khreschatyk.mp3')
+    assert model_audio.output_path(entry) == Path('a/tts/Khreschatyk.wav')
+
+
+def test_the_map_description_gets_a_fixed_name_not_the_shared_basename():
+    """
+    CnapMap and Heart point map_description at the same file as one of their
+    hotspots, so deriving from the basename would collide.
+    """
+    entry = model_audio.NarrationEntry(
+        'map_description', model_audio.MAP_DESCRIPTION_INDEX, 'Опис', 'a/Aorta.mp3')
+    assert model_audio.output_path(entry) == Path('a/tts/map_description.wav')
+
+
+def test_no_real_model_produces_two_entries_with_one_output_path():
+    """The collision this function exists to prevent, checked on real data."""
+    import glob
+    for path in sorted(glob.glob('models/*/*.json')):
+        with open(path, encoding='utf-8') as f:
+            document = json.load(f)
+        if 'model' not in document:
+            continue
+        model = document['model']
+        model.setdefault('mapDescriptionText', 'опис карти')
+        outs = [str(model_audio.output_path(e))
+                for e in model_audio.narration_entries(model) if e.text]
+        assert len(outs) == len(set(outs)), f'{path}: duplicate output paths'
+```
+
+`tests/test_tts_model_audio.py` needs `import json` and `from pathlib import Path`
+if they are not already there.
+
+Run: `.venv/bin/python -m pytest tests/test_tts_model_audio.py -v`
+Expected: 12 passed (9 from Task 4 plus these 3)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1395,12 +1468,18 @@ def generate_for_model(model_path, *, force=False, voice=None, voices_dir=None,
         return 0
 
     jobs = [
-        engine.SynthesisJob(
-            text=entry.text,
-            output_path=model_audio.generated_path(entry.audio_path),
-        )
+        engine.SynthesisJob(text=entry.text, output_path=model_audio.output_path(entry))
         for entry in todo
     ]
+
+    # A collision here would silently give a zone the wrong narration, so refuse
+    # rather than let the last writer win.
+    outputs = [job.output_path for job in jobs]
+    if len(outputs) != len(set(outputs)):
+        duplicates = {p for p in outputs if outputs.count(p) > 1}
+        for path in sorted(duplicates):
+            logger.error(f'two narration entries both target {path}')
+        return len(jobs)
 
     def report(done, total, job):
         logger.info(f'synthesized {done}/{total}: {job.output_path.name}')
