@@ -31,3 +31,7 @@ graphify-out/
 
 # Piper voice models - ~77 MB each, fetched per docs/tts-setup.md
 models/tts_voices/
+
+# Generated narration - rebuild with python -m src.tts.generate_audio
+models/*/Audio/tts/
+models/*/Sound/tts/

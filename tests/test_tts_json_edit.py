@@ -96,14 +96,31 @@ def test_write_verified_adds_no_trailing_newline(tmp_path):
     assert not target.read_text(encoding='utf-8').endswith('\n')
 
 
+# Frozen from models/CnapMap/CnapFirstFloor.json as it read before Task 10 ran
+# src.tts.generate_audio on the real models. This is the shape that broke round
+# 1: the map's "map_description" and one hotspot's "audioDescription" genuinely
+# reused one audio file. A synthetic fixture wouldn't have caught that
+# regression, so it was originally read live off the real file; Task 10 now
+# generates real narration for that same file and permanently repoints both
+# keys at distinct generated clips, so the real file no longer has the shared
+# value to read. Freezing the pre-generation shape here keeps the regression
+# coverage without depending on mutable repository state.
+REAL_CNAP_SNIPPET = (
+    '{\n'
+    '  "model":{\n'
+    '    "map_description":"models/CnapMap/Audio/Passport Services.mp3",\n'
+    '    "hotspots":[\n'
+    '        {"color":[142,124,106], "colorComment":"color1", '
+    '"textDescription": "Паспортні послуги",'
+    '"audioDescription":"models/CnapMap/Audio/Passport Services.mp3"}\n'
+    '    ]\n'
+    '  }\n'
+    '}'
+)
+
+
 def test_a_real_value_shared_across_two_keys_edits_only_the_intended_one():
-    """
-    This is the shape that broke round 1: models/CnapMap/CnapFirstFloor.json
-    genuinely reuses one audio file for both the map's "map_description" and one
-    hotspot's "audioDescription". A synthetic fixture wouldn't have caught the
-    regression, so this test reads the real file (without writing to it).
-    """
-    raw = open('models/CnapMap/CnapFirstFloor.json', encoding='utf-8').read()
+    raw = REAL_CNAP_SNIPPET
     shared_value = 'models/CnapMap/Audio/Passport Services.mp3'
     assert raw.count(json.dumps(shared_value, ensure_ascii=False)) == 2, \
         'fixture assumption changed: the value is no longer shared by two keys'

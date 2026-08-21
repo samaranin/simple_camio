@@ -213,6 +213,29 @@ All tunable parameters are centralized in `src/config.py`:
 - Enable `USE_THREADED_DISPLAY=True` for non-blocking display (recommended for high FPS)
 - Adjust `DISPLAY_FRAME_SKIP` to control display rate (less critical with threaded display)
 
+## Zone narration
+
+Each hotspot's spoken description is generated, not recorded: `generate_audio`
+reads a hotspot's `textDescription` (and, for the map-level clip, the model's
+`mapDescriptionText`) and synthesizes a WAV with Piper, then rewrites the
+model's `audioDescription` / `map_description` to point at it. Only missing
+audio is produced - existing clips are left alone unless `--force` is passed.
+
+```powershell
+python -m src.tts.generate_audio --input1 models/UkraineMap/UkraineMap.json
+```
+
+This requires the `piper-tts` package and a downloaded voice model; see
+[docs/tts-setup.md](docs/tts-setup.md) for installing Piper and fetching the
+`uk_UA-ukrainian_tts-medium` voice used by the bundled maps.
+
+The generated WAVs are not committed to the repository - they are build
+output from text that already lives in the model JSON. A map that ships
+without its `tts/` audio is not broken: `ZoneAudioPlayer` synthesizes
+whatever clips are missing the first time the model loads, so a fresh clone
+or a map without pre-generated narration still speaks, at the cost of a
+short delay on that first load.
+
 ## Troubleshooting
 
 **Map not detected:**

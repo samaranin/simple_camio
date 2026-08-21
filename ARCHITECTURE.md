@@ -40,6 +40,13 @@ simple_camio/
 │   │   ├── __init__.py
 │   │   └── display.py             # Drawing and overlay rendering
 │   │
+│   ├── tts/                       # Zone narration generation (Piper TTS)
+│   │   ├── __init__.py
+│   │   ├── engine.py              # Piper subprocess wrapper
+│   │   ├── model_audio.py         # Narration entry planning over a model dict
+│   │   ├── json_edit.py           # Verified, formatting-preserving JSON edits
+│   │   └── generate_audio.py      # CLI: python -m src.tts.generate_audio
+│   │
 │   └── tap_classifier/            # ML tap classifier package
 │       ├── __init__.py
 │       ├── tap_classifier.py          # Classifier implementation
@@ -168,6 +175,40 @@ Display and rendering functions:
 - `setup_camera()` - Camera initialization and configuration
 - `draw_map_tracking()` - Renders tracking rectangles with flash effects
 - `draw_ui_overlay()` - Draws status text, FPS counter, and gesture info
+
+### `src/tts/` - Zone Narration
+
+Generates the spoken audio for hotspot and map descriptions from each model's
+`textDescription` / `mapDescriptionText`, with Piper as the only component
+that knows a TTS engine exists:
+- `engine.py` - Resolves the `piper` executable and voice files, and runs
+  Piper as a subprocess per clip. It is a subprocess, not an in-process
+  import, so Piper's ONNX runtime never shares a process with MediaPipe and
+  its GPL-3.0 license stays behind a process boundary instead of linking into
+  the app.
+- `model_audio.py` - Plans which narration entries a model needs and where
+  each generated WAV belongs, from a plain model dict. No Piper, no file I/O.
+- `json_edit.py` - Rewrites a model JSON's `audioDescription` /
+  `map_description` strings in place, verifying the result reparses to the
+  expected document, without going through `json.dump` and disturbing the
+  hand-formatted, Cyrillic-literal file.
+- `generate_audio.py` - The `python -m src.tts.generate_audio` CLI that ties
+  the three together to (re)generate a model's narration.
+
+There are two paths to narration audio:
+1. **Pre-generated**: `generate_audio` is run ahead of time (see the "Zone
+   narration" section in `README.md`), writing WAVs into a `tts/` subdirectory
+   next to the model's existing audio and pointing `audioDescription` /
+   `map_description` at them. This is the expected path for a map that ships
+   for real use.
+2. **Runtime fallback**: `ZoneAudioPlayer._synthesize_missing()`
+   (`src/audio/audio.py`) checks for any narration path the model names but
+   that does not exist on disk, and synthesizes just those clips - through the
+   same `engine.py` - before loading any audio. This keeps a map speaking even
+   when its `tts/` directory was never generated or was left out of a
+   deployment (the generated WAVs are gitignored, so this is the normal state
+   right after a fresh clone), at the cost of a delay on that model's first
+   load. It never rewrites the model JSON.
 
 ### `src/tap_classifier/` - Machine Learning Tap Detection
 

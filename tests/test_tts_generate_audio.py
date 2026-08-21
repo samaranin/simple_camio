@@ -142,18 +142,26 @@ def test_the_real_cnap_model_gets_distinct_audio_for_its_shared_source_file(
     """
     CnapFirstFloor.json points map_description at the same source file as its
     first hotspot ("Passport Services.mp3"). Without Step 0's fixed output name,
-    both texts would collide on one output file. mapDescriptionText is not yet
-    populated in the real file (that is Task 9's job), so it is added here to
-    simulate the state this collision actually manifests in.
+    both texts would collide on one output file. The real file already carries
+    its own mapDescriptionText (Task 9), but it is overwritten with a fixed
+    value here so the test does not depend on that text's content.
 
     The real file is copied into tmp_path before anything writes, and nothing
-    under the repo's models/ directory is ever touched.
+    under the repo's models/ directory is ever touched. Task 10 has since run
+    the real generator over models/CnapMap/CnapFirstFloor.json, so
+    models/CnapMap/Audio/tts/ now holds real generated audio; this test
+    snapshots that directory and the real model file instead of asserting they
+    stay absent/unmodified from a clean checkout.
     """
-    # Captured before any chdir, so it always names the real repository's
-    # directory regardless of what the process's cwd becomes below.
+    # Resolved to absolute before any chdir, so these always name the real
+    # repository's paths regardless of what the process's cwd becomes below.
+    real_model_path = Path.cwd() / 'models' / 'CnapMap' / 'CnapFirstFloor.json'
     real_audio_tts_dir = Path.cwd() / 'models' / 'CnapMap' / 'Audio' / 'tts'
+    before_real_model = real_model_path.read_text(encoding='utf-8')
+    before_stamps = {
+        p: p.stat().st_mtime_ns for p in real_audio_tts_dir.iterdir()
+    } if real_audio_tts_dir.exists() else {}
 
-    real_model_path = Path('models/CnapMap/CnapFirstFloor.json')
     copied_model_path = tmp_path / 'models' / 'CnapMap' / 'CnapFirstFloor.json'
     copied_model_path.parent.mkdir(parents=True)
     shutil.copy(real_model_path, copied_model_path)
@@ -177,4 +185,8 @@ def test_the_real_cnap_model_gets_distinct_audio_for_its_shared_source_file(
     assert (tmp_path / description_audio).is_file()
 
     # The real repository is untouched: everything landed under tmp_path.
-    assert not real_audio_tts_dir.exists()
+    assert real_model_path.read_text(encoding='utf-8') == before_real_model
+    after_stamps = {
+        p: p.stat().st_mtime_ns for p in real_audio_tts_dir.iterdir()
+    } if real_audio_tts_dir.exists() else {}
+    assert after_stamps == before_stamps

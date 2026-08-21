@@ -17,3 +17,9 @@ pyglet>=1.5.0,<3.0.0
 # X11). src/audio/audio.py imports it lazily, so the app runs without it, but
 # headless deployments need it present.
 pygame>=2.0.0
+
+# Text-to-speech for zone narration. GPL-3.0, run as a subprocess - see
+# src/tts/engine.py. Only needed to generate audio, or for the runtime fallback
+# when a map ships without it. Voice models are fetched separately; see
+# docs/tts-setup.md.
+piper-tts>=1.7.0,<2.0
