@@ -927,7 +927,7 @@ def pending(entries, *, force=False, subdir=None):
     for entry in entries:
         if not entry.text or not entry.audio_path:
             continue
-        if force or not output_path(entry, subdir).is_file():
+        if force or not generated_path(entry.audio_path, subdir).is_file():
             result.append(entry)
     return result
 ```
@@ -1274,6 +1274,23 @@ def test_no_real_model_produces_two_entries_with_one_output_path():
                 for e in model_audio.narration_entries(model) if e.text]
         assert len(outs) == len(set(outs)), f'{path}: duplicate output paths'
 ```
+
+Then repoint `pending()` at the new function, so the path it checks for existence is
+the same path the CLI will write. It currently reads:
+
+```python
+        if force or not generated_path(entry.audio_path, subdir).is_file():
+```
+
+and becomes:
+
+```python
+        if force or not output_path(entry, subdir).is_file():
+```
+
+Task 4's existing `pending()` tests all build hotspot entries, and `output_path`
+delegates to `generated_path` for those, so their behaviour is unchanged — but run
+them and confirm rather than assuming.
 
 `tests/test_tts_model_audio.py` needs `import json` and `from pathlib import Path`
 if they are not already there.
