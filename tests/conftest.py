@@ -83,3 +83,27 @@ def sample_model_file(tmp_path):
     path = tmp_path / 'model.json'
     path.write_text(text, encoding='utf-8')
     return path
+
+
+@pytest.fixture
+def zone_map_model(tmp_path):
+    """
+    A model whose zone map is three flat colour bands.
+
+    InteractionPolicy2D reads model['filename'] with cv.imread, so the file has
+    to exist on disk. Bands run top to bottom: red, green, blue.
+    """
+    # cv2/numpy are imported here, not at module scope, so collecting the TTS
+    # tests in this file does not pull in OpenCV.
+    import cv2 as cv
+    import numpy as np
+
+    img = np.zeros((90, 30, 3), dtype=np.uint8)
+    img[0:30, :] = (0, 0, 255)    # BGR red
+    img[30:60, :] = (0, 255, 0)   # BGR green
+    img[60:90, :] = (255, 0, 0)   # BGR blue
+
+    path = tmp_path / 'zones.png'
+    cv.imwrite(str(path), img)
+
+    return {'filename': str(path)}
