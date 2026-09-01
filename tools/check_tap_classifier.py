@@ -5,8 +5,15 @@ This script tests that the classifier can be loaded and used
 in the pose detector without errors.
 """
 
-import numpy as np
+import sys
 from pathlib import Path
+
+# This script now lives in tools/, one level below the repo root, so the
+# root (where the src package lives) needs to be on sys.path explicitly:
+# running it directly no longer gets that for free the way pytest did.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import numpy as np
 from src.tap_classifier.tap_classifier import TapClassifier
 import logging
 
