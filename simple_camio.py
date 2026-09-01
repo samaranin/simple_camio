@@ -30,7 +30,6 @@ from src.detection.gesture_detection import GestureDetector, MovementMedianFilte
 from src.detection.pose_detector import CombinedPoseDetector
 from src.detection.sift_detector import SIFTModelDetectorMP
 from src.core.interaction_policy import InteractionPolicy2D
-from src.core.tracking import TrackingSnapshot
 from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
 from src.core.display_thread import DisplayThread
 from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
@@ -429,16 +428,24 @@ def get_pose_results(workers, prof_times):
     return gesture_loc, gesture_status, annotated
 
 
-def get_tracking_snapshot(workers):
+def get_tracking_snapshot(workers, prof_times):
     """
     Read the current tracking snapshot under the shared lock.
+
+    Args:
+        workers (dict): Worker threads and queues
+        prof_times (dict): Performance timing dictionary; the wait for the
+            shared lock is charged to its 'lock' entry, as in get_pose_results.
 
     Returns:
         TrackingSnapshot: One consistent view of the SIFT tracking state.
     """
     sift_worker = workers['sift_worker']
+    t = time.time()
     with workers['lock']:
-        return sift_worker.snapshot
+        snapshot = sift_worker.snapshot
+    prof_times['lock'] += time.time() - t
+    return snapshot
 
 
 def update_sleep_mode(components, cap, gesture_loc, sleep_state, snapshot):
@@ -688,7 +695,7 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
             break
 
         # One consistent view of tracking state for this whole iteration
-        snapshot = get_tracking_snapshot(workers)
+        snapshot = get_tracking_snapshot(workers, prof_times)
 
         # Feed worker queues
         t = time.time()
