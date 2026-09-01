@@ -9,13 +9,18 @@
 A read of the codebase surfaced six issues. One is a live defect that can restart the
 daemon; the rest are debt that makes the defect class hard to prevent.
 
-The live defect: the SIFT tracking state is a cluster of six related attributes —
+The live defect: the SIFT tracking state is a cluster of eight related attributes —
 `H`, `requires_homography`, `last_rect_pts`, `frames_since_last_detection`,
-`tracking_quality_history`, `last_validation_time` — written from roughly 25 sites in
+`tracking_quality_history`, `last_validation_time`, `last_inlier_count`,
+`homography_updated` — written from roughly 25 sites in
 `src/detection/sift_detector.py` on the `SIFTWorker` thread, and read (and partly
 written) from the main thread. No thread owns them. `SIFTWorker` is handed a lock at
 `src/core/workers.py:273` and never acquires it; `PoseWorker` does, at
 `src/core/workers.py:241`.
+
+`tracking_quality_history` is a plain `list`, mutated by the worker through
+`append`/`pop`/`clear` (`src/detection/sift_detector.py:143-218`) while the main thread
+averages it inside `get_tracking_status()`.
 
 Two consequences are reachable today:
 
@@ -35,6 +40,12 @@ Two consequences are reachable today:
 `frames_since_last_detection` is additionally incremented from both threads
 (`simple_camio.py:506-508` and `src/detection/sift_detector.py:147`), so increments are
 lost.
+
+`homography_updated` is worse than the rest because it is an edge-triggered flag rather
+than state: the worker raises it (`src/detection/sift_detector.py:343`) and the main
+thread reads and clears it (`simple_camio.py:696-698`). A second detection landing
+between that read and that clear loses the notification, and the rectangle flash is
+skipped.
 
 The supporting debt:
 
@@ -72,7 +83,8 @@ expected failure mode. Revisit only if such fixtures get recorded.
 | --- | --- | --- |
 | How is the tracking-state race fixed? | The worker publishes an immutable snapshot under the lock; the detector's internal state becomes private to the worker thread | Locking each of ~25 write sites does not give a consumer a consistent *set* of the six attributes. Publishing one object does, and it matches the pattern `PoseWorker` already uses. |
 | Who owns `frames_since_last_detection`? | `SIFTWorker` | One writer removes the lost update. The main-thread increment is deleted. |
-| How does the `h` key request re-detection? | Through `SIFTWorker.trigger_redetect()` | The method already exists (`src/core/workers.py:381`) for exactly this and is currently unused, while the key handler pokes the detector directly. |
+| How does the `h` key request re-detection? | Through `SIFTWorker.trigger_redetect()` alone | The handler already calls it (`simple_camio.py:350`); the two direct assignments above it at `simple_camio.py:335-336` merely duplicate that request against unguarded state. They are deleted, and nothing replaces them. |
+| How is the flash notified without a shared flag? | The snapshot carries a monotonic `detect_generation`; the consumer remembers the last value it saw and flashes when it changes | An edge-triggered flag has to be cleared by its reader, which is precisely the lost-notification race. A counter is write-only for the worker and read-only for the consumer, so nothing is lost and nothing is shared mutably. |
 | Order of work | Defect, then tests, then the mechanical refactors, then the coupling fix | The race is the only actual bug and its diff is smallest against an unchanged tree. Tests for `workers.py` are written *with* step 1, not before it, so they encode the fixed behaviour rather than the broken one. |
 | Configuration override mechanism | CLI flag, falling back to `CAMIO_*` env var, falling back to the class default | Extends the precedent already set by `--headless` at `simple_camio.py:880`. The env layer lets `simple_camio.service` change behaviour without editing its arguments. |
 | Scope of the step-5 coupling fix | Transport only — the three private attributes become explicit parameters. No computation is touched. | The file is the untested one. A behaviour-preserving signature change is verifiable by inspection; a logic change in there is not. |
@@ -86,11 +98,12 @@ A frozen snapshot carries everything a consumer needs:
 
 ```
 TrackingSnapshot(
-    H,            # homography, or None when the map is not currently tracked
-    rect_pts,     # projected template corners in camera coords, or None
-    tracking,     # bool: the inverse of the detector's requires_homography
-    age,          # frames since the last successful detection
-    status_text,  # the display string, rendered by the worker that owns the state
+    H,                 # homography, or None when the map is not currently tracked
+    rect_pts,          # projected template corners in camera coords, or None
+    tracking,          # bool: the inverse of the detector's requires_homography
+    age,               # frames since the last successful detection
+    status_text,       # the display string, rendered by the worker that owns the state
+    detect_generation, # monotonic counter, incremented per successful homography
 )
 ```
 
@@ -117,8 +130,11 @@ with lock: self.snapshot = Snapshot(...)  ──►  with lock: snap = worker.sn
 ```
 
 One acquisition per main-loop iteration yields one consistent set, and every repeated
-read disappears with it. `draw_map_tracking` takes the snapshot instead of the detector,
-which removes both exposed re-reads in `src/ui/display.py`.
+read disappears with it. Both drawing functions take the snapshot instead of the
+detector: `draw_map_tracking` (which removes the two exposed re-reads at
+`src/ui/display.py:32-47`) and `draw_ui_overlay` (which stops calling
+`get_tracking_status()` on the main thread, `src/ui/display.py:69`). After this step no
+consumer outside the worker thread touches the detector object at all.
 
 **Accepted behaviour change:** age counts SIFT-processed frames rather than main-loop
 iterations. The two already diverged, because the queue drops frames under load. The
