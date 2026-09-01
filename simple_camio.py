@@ -33,6 +33,7 @@ from src.core.interaction_policy import InteractionPolicy2D
 from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
 from src.core.display_thread import DisplayThread
 from src.core.containers import Components, Workers
+from src.core.config_overrides import add_arguments, apply_overrides
 from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
 
 logger = logging.getLogger(__name__)
@@ -884,18 +885,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='CamIO - Interactive Map System')
     parser.add_argument('--input1', help='Path to map configuration JSON file',
                        default='models/UkraineMap/UkraineMap.json')
-    parser.add_argument('--headless', action='store_true',
-                       help='Run in headless mode (no display window) - useful for Raspberry Pi daemon mode')
     parser.add_argument('--camera', type=int, default=None, metavar='PORT',
                        help='Camera port to use, skipping auto-detection. '
                             'Recommended for headless/daemon runs, where detecting '
                             'several cameras would otherwise need an interactive choice.')
+    add_arguments(parser)
     args = parser.parse_args()
 
-    # Apply headless mode to configuration if specified
-    if args.headless:
-        CameraConfig.HEADLESS = True
-        logger.info("Headless mode enabled via command line argument")
+    for line in apply_overrides(args):
+        logger.info(f"Config override: {line}")
 
     # Limit OpenCV's internal thread pool to reduce contention between workers
     cv.setNumThreads(2)

@@ -186,6 +186,18 @@ WorkingDirectory=/opt/simple_camio
 ExecStart=/opt/simple_camio/venv/bin/python /opt/simple_camio/simple_camio.py --headless --input1 /opt/simple_camio/models/UkraineMap/UkraineMap.json
 ```
 
+Settings such as resolution, camera backend, tap-data collection and log
+level can also be set with `CAMIO_*` environment variables instead of
+editing `ExecStart` - add them to the unit with `Environment=`:
+
+```ini
+Environment=CAMIO_RESOLUTION=640x480
+Environment=CAMIO_LOG_LEVEL=DEBUG
+```
+
+See the "Runtime overrides" table in the main README for the full list of
+flags and their `CAMIO_*` equivalents.
+
 ### 3. Install the Service
 
 Copy the service file to systemd directory:

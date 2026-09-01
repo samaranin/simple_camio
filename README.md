@@ -20,10 +20,9 @@ Simple CamIO can now automatically collect tap detection data while you use the 
 
 **Quick Start:**
 
-1. Enable in `src/config.py`: `TapDetectionConfig.COLLECT_TAP_DATA = True`
-2. Run the program normally: `python simple_camio.py`
-3. Perform taps as usual - data is collected automatically
-4. Train on your data: `python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset`
+1. Run with collection enabled: `python simple_camio.py --collect-tap-data`
+2. Perform taps as usual - data is collected automatically
+3. Train on your data: `python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset`
 
 For detailed instructions, see [DATA_COLLECTION_GUIDE.md](src/tap_classifier/DATA_COLLECTION_GUIDE.md).
 
@@ -213,6 +212,22 @@ All tunable parameters are centralized in `src/config.py`:
 - Enable `USE_THREADED_DISPLAY=True` for non-blocking display (recommended for high FPS)
 - Adjust `DISPLAY_FRAME_SKIP` to control display rate (less critical with threaded display)
 
+**Runtime overrides:**
+
+A handful of settings can be changed at runtime instead of by editing
+`src/config.py`, via a CLI flag or a `CAMIO_*` environment variable. A flag
+wins over its environment variable, which wins over the class default:
+
+| Flag | Environment variable | Overrides |
+| --- | --- | --- |
+| `--headless` | `CAMIO_HEADLESS=1` | `CameraConfig.HEADLESS` |
+| `--resolution WxH` | `CAMIO_RESOLUTION=WxH` | `CameraConfig.DEFAULT_WIDTH`/`DEFAULT_HEIGHT` |
+| `--camera-backend {auto,v4l2,dshow,msmf,any}` | `CAMIO_CAMERA_BACKEND=...` | `CameraConfig.BACKEND` |
+| `--collect-tap-data` | `CAMIO_COLLECT_TAP_DATA=1` | `TapDetectionConfig.COLLECT_TAP_DATA` |
+| `--log-level {DEBUG,INFO,WARNING,ERROR}` | `CAMIO_LOG_LEVEL=...` | the root logger's level |
+
+Run `python simple_camio.py --help` for the full flag list.
+
 ## Zone narration
 
 Each hotspot's spoken description is generated, not recorded: `generate_audio`
@@ -248,7 +263,7 @@ short delay on that first load.
 
 **Taps not detected:**
 - Verify your pointing gesture (flat hand, extended index finger)
-- Enable debug logging: change `level` in the `logging.basicConfig(...)` call near the top of `simple_camio.py`
+- Enable debug logging: `python simple_camio.py --log-level DEBUG`
 - Check `scale_factor` values in logs (should be 0.35-1.0)
 - Try collecting real-world data and retraining the classifier
 
