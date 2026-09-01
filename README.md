@@ -222,7 +222,7 @@ wins over its environment variable, which wins over the class default:
 | --- | --- | --- |
 | `--headless` | `CAMIO_HEADLESS=1` | `CameraConfig.HEADLESS` |
 | `--resolution WxH` | `CAMIO_RESOLUTION=WxH` | `CameraConfig.DEFAULT_WIDTH`/`DEFAULT_HEIGHT` |
-| `--camera-backend {auto,v4l2,dshow,msmf,any}` | `CAMIO_CAMERA_BACKEND=...` | `CameraConfig.BACKEND` |
+| `--camera-backend {any,dshow,msmf,v4l2}` | `CAMIO_CAMERA_BACKEND=...` | `CameraConfig.BACKEND` |
 | `--collect-tap-data` | `CAMIO_COLLECT_TAP_DATA=1` | `TapDetectionConfig.COLLECT_TAP_DATA` |
 | `--log-level {DEBUG,INFO,WARNING,ERROR}` | `CAMIO_LOG_LEVEL=...` | the root logger's level |
 

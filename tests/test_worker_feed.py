@@ -78,3 +78,37 @@ def test_homography_is_read_exactly_once(rig):
 
     assert snapshot.reads == 1
     assert _queued_homography(rig) is matrix
+
+
+def test_a_full_sift_queue_drops_the_oldest_frame(rig):
+    """
+    The queues hold one frame so the worker always sees the newest. When the
+    worker is still busy the queue is full, and this branch has to evict the
+    stale frame - otherwise put_nowait fails and the new frame is lost, leaving
+    the worker to detect on an image that no longer matches what is on screen.
+    """
+    stale = np.full((8, 8), 7, dtype=np.uint8)
+    rig['workers'].sift_queue.put_nowait(stale)
+
+    simple_camio.feed_worker_queues(
+        rig['frame'], rig['gray'], rig['workers'], TrackingSnapshot()
+    )
+
+    assert rig['workers'].sift_queue.get_nowait() is rig['gray']
+    assert rig['workers'].sift_queue.empty()
+
+
+def test_a_full_pose_queue_drops_the_oldest_frame(rig):
+    """Same eviction on the pose side: the newest frame and homography win."""
+    matrix = np.array([[3.0, 0.0, 1.0], [0.0, 3.0, 2.0], [0.0, 0.0, 1.0]])
+    rig['workers'].pose_queue.put_nowait((np.zeros((8, 8, 3), dtype=np.uint8), np.eye(3)))
+
+    simple_camio.feed_worker_queues(
+        rig['frame'], rig['gray'], rig['workers'],
+        TrackingSnapshot(H=matrix, tracking=True)
+    )
+
+    frame, H = rig['workers'].pose_queue.get_nowait()
+    assert frame is rig['frame']
+    assert H is matrix
+    assert rig['workers'].pose_queue.empty()

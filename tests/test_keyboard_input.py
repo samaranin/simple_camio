@@ -7,13 +7,7 @@ import numpy as np
 import pytest
 
 import simple_camio
-from src.core.containers import Components, Workers
-
-
-class FakeDetector:
-    def __init__(self):
-        self.requires_homography = False
-        self.last_rect_pts = np.zeros((4, 1, 2))
+from src.core.containers import Workers
 
 
 class FakeSiftWorker:
@@ -34,19 +28,12 @@ class FakeAudioWorker:
 
 @pytest.fixture
 def rig():
-    detector = FakeDetector()
-    components = Components(
-        model={}, cam_port=0, model_detector=detector, pose_detector=None,
-        gesture_detector=None, motion_filter=None, interact=None,
-        camio_player=None, crickets_player=None, heartbeat_player=None,
-    )
     workers = Workers(
         audio_worker=FakeAudioWorker(), pose_worker=None,
         sift_worker=FakeSiftWorker(), pose_queue=queue.Queue(maxsize=1),
         sift_queue=queue.Queue(maxsize=1), lock=threading.Lock(),
     )
     return {
-        'components': components,
         'workers': workers,
         'frame': np.zeros((16, 16, 3), dtype=np.uint8),
     }
@@ -58,18 +45,6 @@ def test_h_asks_the_worker_to_redetect(rig):
     )
 
     assert rig['workers'].sift_worker.redetect_calls == 1
-
-
-def test_h_does_not_touch_detector_state(rig):
-    """Those writes raced the worker thread; the worker owns this state now."""
-    detector = rig['components'].model_detector
-
-    simple_camio.handle_keyboard_input(
-        ord('h'), _StopEvent(), rig['frame'], rig['workers']
-    )
-
-    assert detector.requires_homography is False
-    assert detector.last_rect_pts is not None
 
 
 def test_q_signals_shutdown(rig):

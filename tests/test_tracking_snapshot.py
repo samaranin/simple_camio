@@ -7,7 +7,6 @@ import threading
 import numpy as np
 import pytest
 
-from src.core.tracking import TrackingSnapshot
 from src.core.workers import SIFTWorker
 
 
@@ -103,3 +102,37 @@ def test_generation_survives_two_detections_between_reads(worker):
     worker._publish()
 
     assert worker.snapshot.detect_generation == 2
+
+
+def test_a_failure_while_publishing_does_not_kill_the_worker():
+    """
+    _publish() used to sit outside run()'s try. One raise there - it reads five
+    detector attributes and calls get_tracking_status() - ended the daemon
+    thread with nothing in the log, while the main loop went on redrawing the
+    last snapshot forever: tracking dead, process alive, journal silent.
+    """
+
+    class ExplodingDetector(FakeDetector):
+        def __init__(self):
+            super().__init__()
+            self.worker = None
+            self.status_calls = 0
+
+        def get_tracking_status(self):
+            self.status_calls += 1
+            # One pass through the loop is enough to show what escapes.
+            self.worker.stop()
+            raise RuntimeError("status blew up")
+
+    detector = ExplodingDetector()
+    frames = queue.Queue(maxsize=1)
+    worker = SIFTWorker(detector, frames, threading.Lock())
+    detector.worker = worker
+    frames.put_nowait(np.zeros((16, 16), dtype=np.uint8))
+
+    # Runs on this thread on purpose: an escaping exception fails the test
+    # instead of vanishing into a dead daemon thread.
+    worker.run()
+
+    assert detector.status_calls == 1
+    assert worker.snapshot.detect_generation == 0

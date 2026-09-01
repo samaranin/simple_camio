@@ -118,6 +118,23 @@ def draw_ui_overlay(display_img, snapshot, gesture_status, timer, fps_state, cap
     return current_time, fps_state
 
 
+def select_camera_backend():
+    """
+    Choose the OpenCV capture backend from the configuration.
+
+    CameraConfig.BACKEND can legitimately hold a falsy constant - cv.CAP_ANY is
+    0 - so a truthiness test here quietly rewrote 'any' into DirectShow, which
+    does not exist on Linux. Only an absent or None value means "no
+    preference", and on Windows that means DirectShow: src/config.py sets
+    BACKEND = None there expecting exactly this fallback.
+
+    Returns:
+        int: OpenCV capture API preference to pass to cv.VideoCapture.
+    """
+    backend = getattr(CameraConfig, 'BACKEND', None)
+    return cv.CAP_DSHOW if backend is None else backend
+
+
 def setup_camera(cam_port):
     """
     Initialize and configure the camera.
@@ -131,7 +148,7 @@ def setup_camera(cam_port):
     logger.info(f"Setting up camera on port {cam_port}")
 
     # Use configured backend or default
-    backend = CameraConfig.BACKEND if hasattr(CameraConfig, 'BACKEND') and CameraConfig.BACKEND else cv.CAP_DSHOW
+    backend = select_camera_backend()
     cap = cv.VideoCapture(cam_port, backend)
     
     # Set buffer size BEFORE other properties to reduce latency

@@ -7,7 +7,8 @@ import cv2 as cv
 import pytest
 
 from src.config import CameraConfig, TapDetectionConfig
-from src.core.config_overrides import add_arguments, apply_overrides
+from src.core.config_overrides import BACKENDS, add_arguments, apply_overrides
+from src.ui.display import select_camera_backend
 
 
 @pytest.fixture
@@ -89,6 +90,12 @@ def test_cli_wins_over_environment(parser):
     assert CameraConfig.DEFAULT_WIDTH == 640
 
 
+def test_environment_collect_tap_data_is_read(parser):
+    apply_overrides(parser.parse_args([]), environ={'CAMIO_COLLECT_TAP_DATA': 'yes'})
+
+    assert TapDetectionConfig.COLLECT_TAP_DATA is True
+
+
 def test_environment_headless_is_read(parser):
     apply_overrides(parser.parse_args([]), environ={'CAMIO_HEADLESS': '1'})
 
@@ -113,10 +120,37 @@ def test_camera_backend_flag_maps_to_an_opencv_constant(parser):
     assert CameraConfig.BACKEND == cv.CAP_V4L2
 
 
-def test_camera_backend_auto_means_no_backend(parser):
-    apply_overrides(parser.parse_args(['--camera-backend', 'auto']), environ={})
+def test_camera_backend_any_maps_to_cap_any(parser):
+    """
+    'any' is OpenCV's own auto-selection. It used to be spelled 'auto' and map
+    to None, which the camera setup read as "no preference" and replaced with
+    DirectShow - unavailable on Linux, so the camera never opened.
+    """
+    apply_overrides(parser.parse_args(['--camera-backend', 'any']), environ={})
 
-    assert CameraConfig.BACKEND is None
+    assert CameraConfig.BACKEND == cv.CAP_ANY
+
+
+def test_every_backend_choice_maps_to_a_real_constant():
+    """A name mapping to None would be silently rewritten to DirectShow."""
+    assert all(value is not None for value in BACKENDS.values())
+
+
+def test_camera_setup_passes_cap_any_through_unchanged():
+    """
+    cv.CAP_ANY is 0, so the truthiness test this replaced sent it to
+    cv.CAP_DSHOW. No camera is opened here - only the selection is exercised.
+    """
+    CameraConfig.BACKEND = cv.CAP_ANY
+
+    assert select_camera_backend() == cv.CAP_ANY
+
+
+def test_camera_setup_falls_back_to_dshow_when_no_backend_is_set():
+    """src/config.py sets BACKEND = None on Windows expecting DirectShow."""
+    CameraConfig.BACKEND = None
+
+    assert select_camera_backend() == cv.CAP_DSHOW
 
 
 def test_camera_backend_is_read_from_the_environment(parser):

@@ -355,10 +355,13 @@ class SIFTWorker(threading.Thread):
                         if retval and H is not None:
                             break
 
-            except Exception as e:
-                logger.error(f"SIFT worker error: {e}")
+                self._publish()
 
-            self._publish()
+            except Exception as e:
+                # _publish() is inside the try on purpose: a raise here used to
+                # escape run(), killing the daemon thread with no log while the
+                # main loop kept redrawing the last snapshot forever.
+                logger.error(f"SIFT worker error: {e}")
 
     def _prepare_detection_attempts(self, frame):
         """
@@ -394,10 +397,15 @@ class SIFTWorker(threading.Thread):
         Runs on the worker thread, which is the only thread allowed to read the
         detector's attributes. The homography_updated flag is consumed here and
         converted into a monotonic counter, so no consumer has to clear it.
+
+        Every attribute is read bare: SIFTModelDetectorMP.__init__ defines all
+        of them, so a missing one is a broken contract that should show up in
+        the log rather than be papered over with a default that yields a
+        plausible but wrong snapshot. run()'s except Exception covers the call.
         """
         d = self.sift_detector
 
-        if getattr(d, 'homography_updated', False):
+        if d.homography_updated:
             self._generation += 1
             d.homography_updated = False
 

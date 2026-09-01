@@ -535,7 +535,7 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
 
 
 def handle_display_and_input(display_img, display_frame_counter, display_thread, 
-                             stop_event, frame, workers, components, prof_times,
+                             stop_event, frame, workers, prof_times,
                              fps_state, headless=False, sleep_active=False):
     """
     Handle frame display and keyboard input.
@@ -547,7 +547,6 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         stop_event: Event for shutdown coordination
         frame: Current camera frame
         workers (Workers): Worker threads
-        components (Components): System components
         prof_times (dict): Performance timing dictionary
         fps_state (dict): FPS tracking state
         headless (bool): Whether running in headless mode (no display)
@@ -630,6 +629,27 @@ def update_performance_stats(frame_count, prof_start, prof_times, PROF_INTERVAL)
     return frame_count, prof_start, prof_times
 
 
+def apply_detect_flash(snapshot, last_detect_generation, rect_flash_remaining):
+    """
+    Start the tracking-rectangle flash when a new homography has landed.
+
+    The worker increments snapshot.detect_generation once per successful
+    detection. Comparing that counter against the value the consumer last saw
+    cannot lose a detection the way clearing a shared flag did.
+
+    Args:
+        snapshot (TrackingSnapshot): Current tracking state.
+        last_detect_generation (int): Generation this consumer last acted on.
+        rect_flash_remaining (int): Frames left in the flash already running.
+
+    Returns:
+        tuple: (rect_flash_remaining, last_detect_generation)
+    """
+    if snapshot.detect_generation != last_detect_generation:
+        return UIConfig.RECT_FLASH_FRAMES, snapshot.detect_generation
+    return rect_flash_remaining, last_detect_generation
+
+
 def run_main_loop(cap, components, workers, stop_event, headless=False):
     """
     Main processing loop for the CamIO system.
@@ -707,11 +727,10 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         gesture_loc, gesture_status, annotated = get_pose_results(workers, prof_times)
         display_img = frame if annotated is None else annotated
 
-        # A new homography means flash the rectangle. Comparing a monotonic
-        # counter cannot lose a detection the way clearing a shared flag did.
-        if snapshot.detect_generation != last_detect_generation:
-            rect_flash_remaining = UIConfig.RECT_FLASH_FRAMES
-            last_detect_generation = snapshot.detect_generation
+        # A new homography means flash the rectangle.
+        rect_flash_remaining, last_detect_generation = apply_detect_flash(
+            snapshot, last_detect_generation, rect_flash_remaining
+        )
 
         # Process map detection and gestures
         display_img, rect_flash_remaining, last_double_tap_ts, hand_state = process_map_detection(
@@ -731,7 +750,7 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         # Handle display and keyboard input
         should_continue, display_frame_counter, fps_state = handle_display_and_input(
             display_img, display_frame_counter, display_thread,
-            stop_event, frame, workers, components, prof_times, fps_state,
+            stop_event, frame, workers, prof_times, fps_state,
             headless=headless, sleep_active=sleep_state['active']
         )
         if not should_continue:

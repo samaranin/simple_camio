@@ -20,8 +20,11 @@ from src.config import CameraConfig, TapDetectionConfig
 
 logger = logging.getLogger(__name__)
 
+# Every name must map to a real OpenCV constant. 'auto' used to map to None,
+# which the camera setup read as "no preference" and replaced with DirectShow -
+# so on Linux it silently broke the camera. 'any' is cv.CAP_ANY, OpenCV's own
+# auto-selection, and covers that intent.
 BACKENDS = {
-    'auto': None,
     'v4l2': cv.CAP_V4L2,
     'dshow': cv.CAP_DSHOW,
     'msmf': cv.CAP_MSMF,
