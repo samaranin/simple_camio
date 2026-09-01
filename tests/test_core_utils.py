@@ -21,12 +21,30 @@ class TestNormalizeGestureLocation:
         out = normalize_gesture_location(np.array([1.0, 2.0, 3.0]))
 
         assert out is not None
-        assert np.asarray(out).size == 3
+        assert out.shape == (3,)
+        np.testing.assert_array_equal(out, [1.0, 2.0, 3.0])
 
     def test_nested_array_is_flattened_to_three(self):
         out = normalize_gesture_location(np.array([[1.0, 2.0, 3.0]]))
 
-        assert np.asarray(out).size == 3
+        assert out.shape == (3,)
+        np.testing.assert_array_equal(out, [1.0, 2.0, 3.0])
+
+    def test_flat_multi_triplet_keeps_the_most_recent(self):
+        # size % 3 == 0 and size > 3: several [x, y, z] triplets arrived at
+        # once, and the function keeps only the last (most recent) one.
+        out = normalize_gesture_location(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
+
+        assert out.shape == (3,)
+        np.testing.assert_array_equal(out, [4.0, 5.0, 6.0])
+
+    def test_nested_multi_triplet_keeps_the_most_recent(self):
+        out = normalize_gesture_location(
+            np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        )
+
+        assert out.shape == (3,)
+        np.testing.assert_array_equal(out, [4.0, 5.0, 6.0])
 
 
 class TestIsGestureValid:
@@ -61,6 +79,7 @@ class TestLoadMapParameters:
         # load_map_parameters never lets a missing file propagate as
         # FileNotFoundError/OSError: it logs and calls sys.exit(1) so a
         # daemon run fails loudly instead of hanging. That raises
-        # SystemExit, which is what this pins.
-        with pytest.raises(SystemExit):
+        # SystemExit(1), which is what this pins (not just "any SystemExit").
+        with pytest.raises(SystemExit) as exc_info:
             load_map_parameters(str(tmp_path / 'nope.json'))
+        assert exc_info.value.code == 1
