@@ -81,7 +81,7 @@ expected failure mode. Revisit only if such fixtures get recorded.
 
 | Question | Decision | Why |
 | --- | --- | --- |
-| How is the tracking-state race fixed? | The worker publishes an immutable snapshot under the lock; the detector's internal state becomes private to the worker thread | Locking each of ~25 write sites does not give a consumer a consistent *set* of the six attributes. Publishing one object does, and it matches the pattern `PoseWorker` already uses. |
+| How is the tracking-state race fixed? | The worker publishes an immutable snapshot under the lock; the detector's internal state becomes private to the worker thread | Locking each of ~25 write sites does not give a consumer a consistent *set* of the eight attributes. Publishing one object does, and it matches the pattern `PoseWorker` already uses. |
 | Who owns `frames_since_last_detection`? | `SIFTWorker` | One writer removes the lost update. The main-thread increment is deleted. |
 | How does the `h` key request re-detection? | Through `SIFTWorker.trigger_redetect()` alone | The handler already calls it (`simple_camio.py:350`); the two direct assignments above it at `simple_camio.py:335-336` merely duplicate that request against unguarded state. They are deleted, and nothing replaces them. |
 | How is the flash notified without a shared flag? | The snapshot carries a monotonic `detect_generation`; the consumer remembers the last value it saw and flashes when it changes | An edge-triggered flag has to be cleared by its reader, which is precisely the lost-notification race. A counter is write-only for the worker and read-only for the consumer, so nothing is lost and nothing is shared mutably. |
@@ -108,7 +108,7 @@ TrackingSnapshot(
 ```
 
 `status_text` is built inside the worker rather than by the consumer calling
-`get_tracking_status()`, because that method reads three of the six guarded attributes
+`get_tracking_status()`, because that method reads three of the eight guarded attributes
 (`src/detection/sift_detector.py:459-465`) and calling it from the main thread would
 reintroduce exactly the exposure this step removes.
 
@@ -185,11 +185,14 @@ One `apply_overrides(args, environ)` resolving CLI over env over class default, 
 directly. New flags:
 
 - `--collect-tap-data` — what README currently asks the reader to edit source for.
-- `--resolution WxH` and `--camera-backend` — the latter is edited by hand per OS today.
+- `--resolution WxH` and `--camera-backend`. `BACKEND` is already chosen automatically
+  by OS at `src/config.py:61` (`None` on Windows, `cv.CAP_V4L2` otherwise), so the flag
+  overrides that choice rather than replacing a mandatory hand-edit. It does retire the
+  optional one the code's own comment recommends: "Change to cv.CAP_MSMF for
+  potentially better performance".
 - `--log-level` — README currently says to edit the `logging.basicConfig` call.
 
-`CAMIO_*` env equivalents for the daemon. `os` is already imported in `src/config.py` and
-currently unused.
+`CAMIO_*` env equivalents for the daemon.
 
 ### Step 5 — Explicit detector seam
 
