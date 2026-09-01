@@ -1092,7 +1092,6 @@ Expected: PASS, 93 tests (90 + 3).
 
 ```bash
 git add tests/test_tap_classifier_regression.py tests/data/tap_predictions_baseline.json docs/tap-data-findings.md tools/check_tap_classifier.py
-git rm --cached src/tap_classifier/test_tap_classifier.py 2>/dev/null || true
 git commit -m "test: pin classifier predictions to the collected vectors
 
 The 241 recorded samples now serve as a regression baseline, and the manual
@@ -1514,7 +1513,9 @@ Create `tests/test_config_overrides.py`:
 """CLI beats environment beats the class default."""
 
 import argparse
+import logging
 
+import cv2 as cv
 import pytest
 
 from src.config import CameraConfig, TapDetectionConfig
@@ -1530,18 +1531,25 @@ def parser():
 
 @pytest.fixture(autouse=True)
 def restore_config():
-    """Config classes are process-global; put them back after each test."""
+    """
+    Config classes are process-global, so a test that overrides one would leak
+    into every test after it. Restore every attribute apply_overrides can write.
+    """
     saved = {
         'width': CameraConfig.DEFAULT_WIDTH,
         'height': CameraConfig.DEFAULT_HEIGHT,
+        'backend': CameraConfig.BACKEND,
         'headless': CameraConfig.HEADLESS,
         'collect': TapDetectionConfig.COLLECT_TAP_DATA,
+        'log_level': logging.getLogger().level,
     }
     yield
     CameraConfig.DEFAULT_WIDTH = saved['width']
     CameraConfig.DEFAULT_HEIGHT = saved['height']
+    CameraConfig.BACKEND = saved['backend']
     CameraConfig.HEADLESS = saved['headless']
     TapDetectionConfig.COLLECT_TAP_DATA = saved['collect']
+    logging.getLogger().setLevel(saved['log_level'])
 
 
 def test_no_flags_changes_nothing(parser):
@@ -1609,6 +1617,40 @@ def test_applied_overrides_are_reported_for_logging(parser):
 
     assert len(applied) == 1
     assert 'COLLECT_TAP_DATA' in applied[0]
+
+
+def test_camera_backend_flag_maps_to_an_opencv_constant(parser):
+    apply_overrides(parser.parse_args(['--camera-backend', 'v4l2']), environ={})
+
+    assert CameraConfig.BACKEND == cv.CAP_V4L2
+
+
+def test_camera_backend_auto_means_no_backend(parser):
+    apply_overrides(parser.parse_args(['--camera-backend', 'auto']), environ={})
+
+    assert CameraConfig.BACKEND is None
+
+
+def test_camera_backend_is_read_from_the_environment(parser):
+    apply_overrides(parser.parse_args([]), environ={'CAMIO_CAMERA_BACKEND': 'v4l2'})
+
+    assert CameraConfig.BACKEND == cv.CAP_V4L2
+
+
+def test_bad_camera_backend_in_environment_is_rejected(parser):
+    with pytest.raises(ValueError, match='CAMIO_CAMERA_BACKEND'):
+        apply_overrides(parser.parse_args([]), environ={'CAMIO_CAMERA_BACKEND': 'nope'})
+
+
+def test_log_level_flag_sets_the_root_logger(parser):
+    apply_overrides(parser.parse_args(['--log-level', 'DEBUG']), environ={})
+
+    assert logging.getLogger().level == logging.DEBUG
+
+
+def test_bad_log_level_in_environment_is_rejected(parser):
+    with pytest.raises(ValueError, match='CAMIO_LOG_LEVEL'):
+        apply_overrides(parser.parse_args([]), environ={'CAMIO_LOG_LEVEL': 'CHATTY'})
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1759,7 +1801,7 @@ def apply_overrides(args, environ=None):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_config_overrides.py -v`
-Expected: PASS, 10 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: Wire it into the entry point**
 
@@ -1832,7 +1874,7 @@ noting the CLI-over-env-over-default precedence, and mention in
 - [ ] **Step 8: Run the full suite**
 
 Run: `.venv/bin/python -m pytest -q`
-Expected: PASS, 118 tests (108 + 10).
+Expected: PASS, 124 tests (108 + 16).
 
 - [ ] **Step 9: Device check**
 
@@ -2065,7 +2107,7 @@ Expected: PASS, 3 tests.
 - [ ] **Step 9: Run the full suite**
 
 Run: `.venv/bin/python -m pytest -q`
-Expected: PASS, 121 tests (118 + 3).
+Expected: PASS, 127 tests (124 + 3).
 
 - [ ] **Step 10: Device check**
 
@@ -2094,7 +2136,7 @@ the invariant the seam exists for, that MediaPipe runs once per frame."
 
 ## After the last task
 
-- [ ] Full suite green: `.venv/bin/python -m pytest -q` — expected 121 tests.
+- [ ] Full suite green: `.venv/bin/python -m pytest -q` — expected 127 tests.
 - [ ] `graphify update .` to refresh the knowledge graph, as `CLAUDE.md` requires.
 - [ ] Confirm the eight originally-flagged consumer lines are all gone:
       `grep -n "model_detector\." simple_camio.py src/ui/display.py` returns nothing.
