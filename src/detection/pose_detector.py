@@ -1231,7 +1231,17 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
     flexion-angle logic. Does not modify base class methods.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, reuse_base_outputs=False):
+        """
+        Initialize the enhanced detector.
+
+        Args:
+            model (dict): Map model configuration
+            reuse_base_outputs (bool): When True, detect() expects its caller to
+                supply the base pass's outputs and MediaPipe results rather than
+                computing them. CombinedPoseDetector sets this; a standalone
+                enhanced detector leaves it False.
+        """
         super().__init__(model)
         # Extra per-hand state
         self._tap_state_plus = {}  # keyed by hand ('Left'/'Right')
@@ -1247,6 +1257,9 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
             logger.warning(f"Could not initialize TapClassifier: {e}. Using fallback.")
             self.tap_classifier = None
         # self._hand_size_cache is inherited
+
+        # Whether detect() reuses caller-supplied base outputs / MediaPipe results
+        self.reuse_base_outputs = reuse_base_outputs
 
     def _load_enhanced_config(self):
         """Load enhanced tap detection configuration parameters."""
@@ -1452,7 +1465,8 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
 
     # ---------- Enhanced tap detection ----------
 
-    def detect(self, image, H, _, processing_scale=0.5, draw=False):
+    def detect(self, image, H, _, processing_scale=0.5, draw=False,
+               base_outputs=None, mp_results=None):
         """
         Run base detect, compute enhanced signals, and fuse for safer outputs.
         
@@ -1466,6 +1480,10 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
             _ : Unused parameter (kept for compatibility)
             processing_scale (float): Scale factor for processing
             draw (bool): Whether to draw annotations
+            base_outputs (tuple): Caller-supplied (index_pos, status, img) from the
+                base pass, used only when reuse_base_outputs is True
+            mp_results (tuple): Caller-supplied (results, orig_w, orig_h) from
+                MediaPipe, so the expensive call happens once per frame
             
         Returns:
             tuple: (final_pos, final_status, final_img)
@@ -1473,11 +1491,13 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
                 - final_status: 'double_tap', 'pointing', 'moving', or None
                 - final_img: Annotated image if draw=True, else None
         """
-        # Use cached base outputs when used in combination wrapper
-        base_index_pos, base_status, base_img = self._get_base_outputs()
+        # Use supplied base outputs when used in combination wrapper
+        base_index_pos, base_status, base_img = self._get_base_outputs(base_outputs)
         
         # Get or process MediaPipe results
-        results, ow, oh = self._get_mediapipe_results(image, processing_scale)
+        results, ow, oh = self._get_mediapipe_results(
+            image, processing_scale, mp_results
+        )
         
         # Process hands with enhanced detection
         img_out = image.copy() if draw else None
@@ -1491,32 +1511,36 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
             base_index_pos, base_status, base_img, draw
         )
     
-    def _get_base_outputs(self):
+    def _get_base_outputs(self, base_outputs):
         """
-        Get cached base detector outputs if available.
+        Get the supplied base detector outputs if available.
+        
+        Args:
+            base_outputs (tuple): (base_index_pos, base_status, base_img) or None
         
         Returns:
             tuple: (base_index_pos, base_status, base_img)
         """
-        if getattr(self, "_skip_super", False) and hasattr(self, "_base_cache"):
-            return self._base_cache
+        if self.reuse_base_outputs and base_outputs is not None:
+            return base_outputs
         else:
             # Will process with MediaPipe later
             return None, None, None
     
-    def _get_mediapipe_results(self, image, processing_scale):
+    def _get_mediapipe_results(self, image, processing_scale, mp_results):
         """
-        Get MediaPipe results from cache or process image.
+        Get MediaPipe results from the caller or process image.
         
         Args:
             image (numpy.ndarray): Input camera frame
             processing_scale (float): Scale factor for processing
+            mp_results (tuple): (results, orig_w, orig_h) or None
             
         Returns:
             tuple: (results, orig_w, orig_h)
         """
         # Check if CombinedPoseDetector provided results
-        provided = getattr(self, "_provided_results", None)
+        provided = mp_results
         if provided is not None:
             try:
                 results, ow, oh = provided
@@ -2323,15 +2347,12 @@ class CombinedPoseDetector:
                 - Other model-specific parameters
         """
         self.base = PoseDetectorMP(model)
-        self.enh = PoseDetectorMPEnhanced(model)
+        self.enh = PoseDetectorMPEnhanced(model, reuse_base_outputs=True)
         
         # Share the same data collector between both detectors
         # This ensures all collected samples go to one place
         shared_collector = self.enh.data_collector
         self.base.data_collector = shared_collector
-        
-        # Tell enhanced to use cached base outputs instead of calling super()
-        self.enh._skip_super = True
         
         # Propagate image (for downstream tools that may inspect it)
         self.image_map_color = self.base.image_map_color
@@ -2351,12 +2372,12 @@ class CombinedPoseDetector:
 
     def detect(self, image, H, _, processing_scale=0.5, draw=False):
         """
-        Run base pass, cache outputs, then run enhanced and fuse results.
+        Run base pass, then run enhanced with its outputs and fuse results.
         
         This method orchestrates the detection pipeline:
         1. Run base detector (compute-only, no drawing)
-        2. Cache base outputs and MediaPipe results
-        3. Run enhanced detector using cached MediaPipe results
+        2. Collect base outputs and MediaPipe results
+        3. Run enhanced detector using the shared MediaPipe results
         4. Fuse outputs and return (enhanced detector handles drawing)
         
         Args:
@@ -2373,16 +2394,13 @@ class CombinedPoseDetector:
                 - img_out: Annotated image if draw=True, else None
         """
         # Draw only once (in enhanced), keep base compute-only
-        base_index_pos, base_status, base_img = self.base.detect(
+        base_outputs = self.base.detect(
             image, H, _, processing_scale, draw=False
         )
         
-        # Cache base outputs for enhanced detector
-        self.enh._base_cache = (base_index_pos, base_status, base_img)
-        
-        # Share MediaPipe results to avoid reprocessing
-        mp_results, ow, oh = self.base.get_cached_mp_results()
-        self.enh._provided_results = (mp_results, ow, oh)
+        # Share MediaPipe results so the expensive call happens once per frame
+        mp_results = self.base.get_cached_mp_results()
         
         # Run enhanced detector with drawing enabled
-        return self.enh.detect(image, H, _, processing_scale, draw)
+        return self.enh.detect(image, H, _, processing_scale, draw,
+                               base_outputs=base_outputs, mp_results=mp_results)
