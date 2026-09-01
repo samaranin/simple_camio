@@ -30,6 +30,7 @@ from src.detection.gesture_detection import GestureDetector, MovementMedianFilte
 from src.detection.pose_detector import CombinedPoseDetector
 from src.detection.sift_detector import SIFTModelDetectorMP
 from src.core.interaction_policy import InteractionPolicy2D
+from src.core.tracking import TrackingSnapshot
 from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
 from src.core.display_thread import DisplayThread
 from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
@@ -173,7 +174,7 @@ def setup_signal_handler(stop_event):
     signal.signal(signal.SIGTERM, signal_handler)
 
 
-def feed_worker_queues(frame, gray, workers, model_detector):
+def feed_worker_queues(frame, gray, workers, snapshot):
     """
     Feed frames to worker queues for background processing.
 
@@ -181,7 +182,7 @@ def feed_worker_queues(frame, gray, workers, model_detector):
         frame: Color camera frame
         gray: Grayscale camera frame
         workers (dict): Worker threads and queues
-        model_detector: SIFT detector instance
+        snapshot (TrackingSnapshot): Current tracking state
     """
     # Feed SIFT worker (always use latest frame, drop old ones)
     try:
@@ -196,8 +197,10 @@ def feed_worker_queues(frame, gray, workers, model_detector):
         except queue.Full:
             pass
 
-    # Feed pose worker with frame and current homography
-    H_current = model_detector.H if model_detector.H is not None else IDENTITY_3
+    # Feed pose worker with frame and current homography. Read once: the old
+    # code tested and re-read the attribute, so None could reach the queue.
+    H = snapshot.H
+    H_current = H if H is not None else IDENTITY_3
     try:
         workers['pose_queue'].put_nowait((frame, H_current))
     except queue.Full:
@@ -332,8 +335,6 @@ def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
     if waitkey == ord('h'):
         logger.info("Manual re-detection triggered by user")
         gray_now = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        components['model_detector'].requires_homography = True
-        components['model_detector'].last_rect_pts = None
 
         # Force feed the frame to SIFT worker
         for _ in range(3):
@@ -428,7 +429,19 @@ def get_pose_results(workers, prof_times):
     return gesture_loc, gesture_status, annotated
 
 
-def update_sleep_mode(components, cap, gesture_loc, sleep_state):
+def get_tracking_snapshot(workers):
+    """
+    Read the current tracking snapshot under the shared lock.
+
+    Returns:
+        TrackingSnapshot: One consistent view of the SIFT tracking state.
+    """
+    sift_worker = workers['sift_worker']
+    with workers['lock']:
+        return sift_worker.snapshot
+
+
+def update_sleep_mode(components, cap, gesture_loc, sleep_state, snapshot):
     """
     Switch between active FPS and low-power sleep FPS.
 
@@ -437,11 +450,7 @@ def update_sleep_mode(components, cap, gesture_loc, sleep_state):
     quality, frequent frames.
     """
     now = time.time()
-    model_detector = components['model_detector']
-    map_tracked = (
-        model_detector.H is not None and
-        not getattr(model_detector, 'requires_homography', True)
-    )
+    map_tracked = snapshot.tracking and snapshot.H is not None
     gesture_active = is_gesture_valid(gesture_loc)
 
     if not map_tracked or gesture_active:
@@ -473,7 +482,7 @@ def update_sleep_mode(components, cap, gesture_loc, sleep_state):
 
 def process_map_detection(components, workers, display_img, rect_flash_remaining, 
                           gesture_loc, gesture_status, last_double_tap_ts, prof_times,
-                          hand_state):
+                          hand_state, snapshot):
     """
     Process map detection status and handle gestures/audio.
     
@@ -487,13 +496,14 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
         last_double_tap_ts (float): Last double-tap timestamp
         prof_times (dict): Performance timing dictionary
         hand_state (dict): Hand detection state tracking
+        snapshot (TrackingSnapshot): Current tracking state
         
     Returns:
         tuple: (updated_display_img, rect_flash_remaining, last_double_tap_ts, updated_hand_state)
     """
     t = time.time()
     
-    if components['model_detector'].H is None:
+    if snapshot.H is None:
         # Map not detected - play ambient crickets
         if hand_state['was_detected']:
             workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
@@ -501,16 +511,9 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
         hand_state['was_detected'] = False
         hand_state['first_detected_ts'] = 0.0
     else:
-        # Map detected - increment age counter
-        try:
-            components['model_detector'].frames_since_last_detection += 1
-        except Exception:
-            components['model_detector'].frames_since_last_detection = 1
-
         # Draw tracking rectangle
         display_img, rect_flash_remaining = draw_map_tracking(
-            display_img, components['model_detector'],
-            components['interact'], rect_flash_remaining
+            display_img, snapshot, components['interact'], rect_flash_remaining
         )
 
         # Process gestures and audio
@@ -633,6 +636,7 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
     # Initialize state variables
     last_double_tap_ts = 0.0
     rect_flash_remaining = 0
+    last_detect_generation = 0
     timer = time.time() - 1
     
     # Hand detection state (consolidated into one dict)
@@ -683,31 +687,36 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         if stop_event.is_set():
             break
 
+        # One consistent view of tracking state for this whole iteration
+        snapshot = get_tracking_snapshot(workers)
+
         # Feed worker queues
         t = time.time()
-        feed_worker_queues(frame, gray, workers, components['model_detector'])
+        feed_worker_queues(frame, gray, workers, snapshot)
         prof_times['feed'] += time.time() - t
 
         # Get latest pose detection results
         gesture_loc, gesture_status, annotated = get_pose_results(workers, prof_times)
         display_img = frame if annotated is None else annotated
 
-        # Check for homography update (triggers flash)
-        if getattr(components['model_detector'], 'homography_updated', False):
+        # A new homography means flash the rectangle. Comparing a monotonic
+        # counter cannot lose a detection the way clearing a shared flag did.
+        if snapshot.detect_generation != last_detect_generation:
             rect_flash_remaining = UIConfig.RECT_FLASH_FRAMES
-            components['model_detector'].homography_updated = False
+            last_detect_generation = snapshot.detect_generation
 
         # Process map detection and gestures
         display_img, rect_flash_remaining, last_double_tap_ts, hand_state = process_map_detection(
             components, workers, display_img, rect_flash_remaining,
-            gesture_loc, gesture_status, last_double_tap_ts, prof_times, hand_state
+            gesture_loc, gesture_status, last_double_tap_ts, prof_times, hand_state,
+            snapshot
         )
 
-        sleep_state = update_sleep_mode(components, cap, gesture_loc, sleep_state)
+        sleep_state = update_sleep_mode(components, cap, gesture_loc, sleep_state, snapshot)
 
         # Draw UI overlay
         t = time.time()
-        timer, fps_state = draw_ui_overlay(display_img, components['model_detector'],
+        timer, fps_state = draw_ui_overlay(display_img, snapshot,
                                            gesture_status, timer, fps_state, cap)
         prof_times['ui'] += time.time() - t
 

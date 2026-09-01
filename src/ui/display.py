@@ -16,46 +16,48 @@ from src.core.camera_thread import ThreadedCamera
 logger = logging.getLogger(__name__)
 
 
-def draw_map_tracking(display_img, model_detector, interact, rect_flash_remaining):
+def draw_map_tracking(display_img, snapshot, interact, rect_flash_remaining):
     """
     Draw the map tracking rectangle on the display image.
 
     Args:
         display_img: Image to draw on
-        model_detector: SIFT detector with tracking info
+        snapshot (TrackingSnapshot): Consistent view of the tracking state
         interact: Interaction policy with map shape
         rect_flash_remaining (int): Frames remaining for flash effect
 
     Returns:
         tuple: (updated_image, updated_flash_remaining)
     """
-    if getattr(model_detector, 'last_rect_pts', None) is not None:
+    rect_pts = snapshot.rect_pts
+
+    if rect_pts is not None:
         if rect_flash_remaining > 0:
             display_img = draw_rectangle_from_points(
-                display_img, model_detector.last_rect_pts,
+                display_img, rect_pts,
                 color=UIConfig.COLOR_YELLOW, thickness=5
             )
             rect_flash_remaining -= 1
         else:
             display_img = draw_rectangle_from_points(
-                display_img, model_detector.last_rect_pts,
+                display_img, rect_pts,
                 color=UIConfig.COLOR_GREEN, thickness=3
             )
-    else:
+    elif snapshot.H is not None:
         display_img = draw_rectangle_on_image(
-            display_img, interact.image_map_color.shape, model_detector.H
+            display_img, interact.image_map_color.shape, snapshot.H
         )
 
     return display_img, rect_flash_remaining
 
 
-def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_state, cap):
+def draw_ui_overlay(display_img, snapshot, gesture_status, timer, fps_state, cap):
     """
     Draw status information overlay on the display image.
 
     Args:
         display_img: Image to draw on
-        model_detector: SIFT detector for status
+        snapshot (TrackingSnapshot): Consistent view of the tracking state
         gesture_status: Current gesture status
         timer (float): Previous frame timestamp for FPS calculation
         fps_state (dict): FPS tracking state with keys: 'display_count', 
@@ -65,8 +67,8 @@ def draw_ui_overlay(display_img, model_detector, gesture_status, timer, fps_stat
     Returns:
         tuple: (current_timestamp, updated_fps_state)
     """
-    # Tracking status
-    status_text = model_detector.get_tracking_status()
+    # Tracking status, rendered by the thread that owns the tracking state
+    status_text = snapshot.status_text
     cv.putText(display_img, status_text, (10, 30),
               cv.FONT_HERSHEY_SIMPLEX, UIConfig.FONT_SCALE,
               UIConfig.COLOR_GREEN, UIConfig.FONT_THICKNESS)
