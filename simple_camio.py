@@ -32,6 +32,7 @@ from src.detection.sift_detector import SIFTModelDetectorMP
 from src.core.interaction_policy import InteractionPolicy2D
 from src.core.workers import PoseWorker, SIFTWorker, AudioWorker, AudioCommand
 from src.core.display_thread import DisplayThread
+from src.core.containers import Components, Workers
 from src.ui.display import draw_map_tracking, draw_ui_overlay, setup_camera
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ def initialize_system(model_path, cam_port=None):
             auto-detection is skipped entirely (required for daemon runs).
 
     Returns:
-        dict: Dictionary containing all initialized components
+        Components: Initialized system components
     """
     logger.info("Initializing CamIO system...")
 
@@ -82,18 +83,18 @@ def initialize_system(model_path, cam_port=None):
 
     logger.info("System initialization complete")
 
-    return {
-        'model': model,
-        'cam_port': cam_port,
-        'model_detector': model_detector,
-        'pose_detector': pose_detector,
-        'gesture_detector': gesture_detector,
-        'motion_filter': motion_filter,
-        'interact': interact,
-        'camio_player': camio_player,
-        'crickets_player': crickets_player,
-        'heartbeat_player': heartbeat_player
-    }
+    return Components(
+        model=model,
+        cam_port=cam_port,
+        model_detector=model_detector,
+        pose_detector=pose_detector,
+        gesture_detector=gesture_detector,
+        motion_filter=motion_filter,
+        interact=interact,
+        camio_player=camio_player,
+        crickets_player=crickets_player,
+        heartbeat_player=heartbeat_player,
+    )
 
 
 def create_worker_threads(components, stop_event):
@@ -101,11 +102,11 @@ def create_worker_threads(components, stop_event):
     Create and start background worker threads.
 
     Args:
-        components (dict): Dictionary of system components
+        components (Components): System components
         stop_event (threading.Event): Event for coordinated shutdown
 
     Returns:
-        dict: Dictionary containing workers and synchronization objects
+        Workers: Worker threads and synchronization objects
     """
     logger.info("Creating worker threads...")
 
@@ -116,7 +117,7 @@ def create_worker_threads(components, stop_event):
 
     # Create workers
     pose_worker = PoseWorker(
-        components['pose_detector'],
+        components.pose_detector,
         pose_queue,
         lock,
         processing_scale=CameraConfig.POSE_PROCESSING_SCALE,
@@ -124,7 +125,7 @@ def create_worker_threads(components, stop_event):
     )
 
     sift_worker = SIFTWorker(
-        components['model_detector'],
+        components.model_detector,
         sift_queue,
         lock,
         stop_event=stop_event
@@ -132,9 +133,9 @@ def create_worker_threads(components, stop_event):
 
     # Create audio worker for non-blocking audio playback
     audio_worker = AudioWorker(
-        components['camio_player'],
-        components['heartbeat_player'],
-        components['crickets_player'],
+        components.camio_player,
+        components.heartbeat_player,
+        components.crickets_player,
         stop_event
     )
 
@@ -145,14 +146,14 @@ def create_worker_threads(components, stop_event):
 
     logger.info("Worker threads started")
 
-    return {
-        'pose_queue': pose_queue,
-        'sift_queue': sift_queue,
-        'lock': lock,
-        'pose_worker': pose_worker,
-        'sift_worker': sift_worker,
-        'audio_worker': audio_worker
-    }
+    return Workers(
+        audio_worker=audio_worker,
+        pose_worker=pose_worker,
+        sift_worker=sift_worker,
+        pose_queue=pose_queue,
+        sift_queue=sift_queue,
+        lock=lock,
+    )
 
 
 def setup_signal_handler(stop_event):
@@ -180,19 +181,19 @@ def feed_worker_queues(frame, gray, workers, snapshot):
     Args:
         frame: Color camera frame
         gray: Grayscale camera frame
-        workers (dict): Worker threads and queues
+        workers (Workers): Worker threads and queues
         snapshot (TrackingSnapshot): Current tracking state
     """
     # Feed SIFT worker (always use latest frame, drop old ones)
     try:
-        workers['sift_queue'].put_nowait(gray)
+        workers.sift_queue.put_nowait(gray)
     except queue.Full:
         try:
-            _ = workers['sift_queue'].get_nowait()
+            _ = workers.sift_queue.get_nowait()
         except queue.Empty:
             pass
         try:
-            workers['sift_queue'].put_nowait(gray)
+            workers.sift_queue.put_nowait(gray)
         except queue.Full:
             pass
 
@@ -201,14 +202,14 @@ def feed_worker_queues(frame, gray, workers, snapshot):
     H = snapshot.H
     H_current = H if H is not None else IDENTITY_3
     try:
-        workers['pose_queue'].put_nowait((frame, H_current))
+        workers.pose_queue.put_nowait((frame, H_current))
     except queue.Full:
         try:
-            _ = workers['pose_queue'].get_nowait()
+            _ = workers.pose_queue.get_nowait()
         except queue.Empty:
             pass
         try:
-            workers['pose_queue'].put_nowait((frame, H_current))
+            workers.pose_queue.put_nowait((frame, H_current))
         except queue.Full:
             pass
 
@@ -221,7 +222,7 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
     Args:
         gesture_loc: Detected gesture location
         gesture_status: Status of the gesture
-        components (dict): System components
+        components (Components): System components
         last_double_tap_ts (float): Timestamp of last double-tap
         audio_worker (AudioWorker): Audio worker for non-blocking playback
         hand_state (dict): Hand detection state tracking
@@ -261,14 +262,14 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         audio_worker.enqueue_command(AudioCommand('heartbeat_play'))
         
         # Reset zone filter to ensure clean tracking from start
-        components['interact'].reset_zone_filter()
-        
+        components.interact.reset_zone_filter()
+
         # Update zone tracking and set prev_zone_name to prevent zone audio on first appearance
-        zone_id = components['interact'].push_gesture(gesture_loc)
-        if zone_id in components['camio_player'].hotspots:
-            components['camio_player'].prev_zone_name = components['camio_player'].hotspots[zone_id]['textDescription']
+        zone_id = components.interact.push_gesture(gesture_loc)
+        if zone_id in components.camio_player.hotspots:
+            components.camio_player.prev_zone_name = components.camio_player.hotspots[zone_id]['textDescription']
         else:
-            components['camio_player'].prev_zone_name = None
+            components.camio_player.prev_zone_name = None
         
         # Update hand state
         hand_state['was_detected'] = True
@@ -285,7 +286,7 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         now = time.time()
         if now - last_double_tap_ts > TapDetectionConfig.DOUBLE_TAP_COOLDOWN_MAIN:
             try:
-                zone_id = components['interact'].push_gesture(gesture_loc)
+                zone_id = components.interact.push_gesture(gesture_loc)
                 audio_worker.enqueue_command(
                     AudioCommand('play_zone', zone_id=zone_id, gesture_status='double_tap')
                 )
@@ -295,22 +296,22 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
                 logger.error(f"Error handling double_tap: {e}")
     elif not in_cooldown:
         # Normal gesture processing (only if not in cooldown)
-        zone_id = components['interact'].push_gesture(gesture_loc)
+        zone_id = components.interact.push_gesture(gesture_loc)
         audio_worker.enqueue_command(
             AudioCommand('play_zone', zone_id=zone_id, gesture_status=gesture_status)
         )
     else:
         # In cooldown - update zone tracking but don't play audio
-        zone_id = components['interact'].push_gesture(gesture_loc)
+        zone_id = components.interact.push_gesture(gesture_loc)
         # Also update prev_zone_name to track current zone during cooldown
         # This prevents audio from playing when cooldown expires
-        if zone_id in components['camio_player'].hotspots:
-            components['camio_player'].prev_zone_name = components['camio_player'].hotspots[zone_id]['textDescription']
+        if zone_id in components.camio_player.hotspots:
+            components.camio_player.prev_zone_name = components.camio_player.hotspots[zone_id]['textDescription']
 
     return last_double_tap_ts, hand_state
 
 
-def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+def handle_keyboard_input(waitkey, stop_event, frame, workers):
     """
     Handle keyboard input for user controls.
 
@@ -318,8 +319,7 @@ def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
         waitkey: Key code from cv.waitKey()
         stop_event: Event for shutdown signaling
         frame: Current camera frame
-        workers (dict): Worker threads and queues
-        components (dict): System components
+        workers (Workers): Worker threads and queues
 
     Returns:
         bool: True if should continue, False if should exit
@@ -338,21 +338,21 @@ def handle_keyboard_input(waitkey, stop_event, frame, workers, components):
         # Force feed the frame to SIFT worker
         for _ in range(3):
             try:
-                workers['sift_queue'].put_nowait(gray_now)
+                workers.sift_queue.put_nowait(gray_now)
             except queue.Full:
                 try:
-                    _ = workers['sift_queue'].get_nowait()
+                    _ = workers.sift_queue.get_nowait()
                 except queue.Empty:
                     pass
                 try:
-                    workers['sift_queue'].put_nowait(gray_now)
+                    workers.sift_queue.put_nowait(gray_now)
                 except queue.Full:
                     pass
-        workers['sift_worker'].trigger_redetect()
+        workers.sift_worker.trigger_redetect()
 
     # Toggle blips
     if waitkey == ord('b'):
-        workers['audio_worker'].enqueue_command(AudioCommand('toggle_blips'))
+        workers.audio_worker.enqueue_command(AudioCommand('toggle_blips'))
 
     return True
 
@@ -415,15 +415,15 @@ def get_pose_results(workers, prof_times):
     Get latest pose detection results from worker thread.
     
     Args:
-        workers (dict): Worker threads and queues
+        workers (Workers): Worker threads and queues
         prof_times (dict): Performance timing dictionary
-        
+
     Returns:
         tuple: (gesture_loc, gesture_status, annotated_frame)
     """
     t = time.time()
-    with workers['lock']:
-        gesture_loc, gesture_status, annotated = workers['pose_worker'].latest
+    with workers.lock:
+        gesture_loc, gesture_status, annotated = workers.pose_worker.latest
     prof_times['lock'] += time.time() - t
     return gesture_loc, gesture_status, annotated
 
@@ -433,22 +433,22 @@ def get_tracking_snapshot(workers, prof_times):
     Read the current tracking snapshot under the shared lock.
 
     Args:
-        workers (dict): Worker threads and queues
+        workers (Workers): Worker threads and queues
         prof_times (dict): Performance timing dictionary; the wait for the
             shared lock is charged to its 'lock' entry, as in get_pose_results.
 
     Returns:
         TrackingSnapshot: One consistent view of the SIFT tracking state.
     """
-    sift_worker = workers['sift_worker']
+    sift_worker = workers.sift_worker
     t = time.time()
-    with workers['lock']:
+    with workers.lock:
         snapshot = sift_worker.snapshot
     prof_times['lock'] += time.time() - t
     return snapshot
 
 
-def update_sleep_mode(components, cap, gesture_loc, sleep_state, snapshot):
+def update_sleep_mode(cap, gesture_loc, sleep_state, snapshot):
     """
     Switch between active FPS and low-power sleep FPS.
 
@@ -494,8 +494,8 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
     Process map detection status and handle gestures/audio.
     
     Args:
-        components (dict): System components
-        workers (dict): Worker threads
+        components (Components): System components
+        workers (Workers): Worker threads
         display_img: Current display image
         rect_flash_remaining (int): Flash counter for rectangle
         gesture_loc: Current gesture location
@@ -513,20 +513,20 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
     if snapshot.H is None:
         # Map not detected - play ambient crickets
         if hand_state['was_detected']:
-            workers['audio_worker'].enqueue_command(AudioCommand('heartbeat_pause'))
-            workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
+            workers.audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
+            workers.audio_worker.enqueue_command(AudioCommand('crickets_play'))
         hand_state['was_detected'] = False
         hand_state['first_detected_ts'] = 0.0
     else:
         # Draw tracking rectangle
         display_img, rect_flash_remaining = draw_map_tracking(
-            display_img, snapshot, components['interact'], rect_flash_remaining
+            display_img, snapshot, components.interact, rect_flash_remaining
         )
 
         # Process gestures and audio
         last_double_tap_ts, hand_state = process_gestures_and_audio(
             gesture_loc, gesture_status, components, last_double_tap_ts,
-            workers['audio_worker'], hand_state
+            workers.audio_worker, hand_state
         )
     
     prof_times['draw'] += time.time() - t
@@ -545,8 +545,8 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
         display_thread: DisplayThread or None
         stop_event: Event for shutdown coordination
         frame: Current camera frame
-        workers (dict): Worker threads
-        components (dict): System components
+        workers (Workers): Worker threads
+        components (Components): System components
         prof_times (dict): Performance timing dictionary
         fps_state (dict): FPS tracking state
         headless (bool): Whether running in headless mode (no display)
@@ -591,7 +591,7 @@ def handle_display_and_input(display_img, display_frame_counter, display_thread,
     t = time.time()
     should_continue = True
     if waitkey != 255:  # 255 means no key pressed
-        if not handle_keyboard_input(waitkey, stop_event, frame, workers, components):
+        if not handle_keyboard_input(waitkey, stop_event, frame, workers):
             should_continue = False
     prof_times['key'] += time.time() - t
     
@@ -635,8 +635,8 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
 
     Args:
         cap: Camera capture object
-        components (dict): System components
-        workers (dict): Worker threads and queues
+        components (Components): System components
+        workers (Workers): Worker threads and queues
         stop_event: Event for shutdown coordination
         headless (bool): Whether to run in headless mode (no display)
     """
@@ -678,8 +678,8 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
     display_thread = initialize_display(CameraConfig.USE_THREADED_DISPLAY, headless=headless)
 
     # Play welcome message at startup and start with crickets
-    workers['audio_worker'].enqueue_command(AudioCommand('play_welcome'))
-    workers['audio_worker'].enqueue_command(AudioCommand('crickets_play'))
+    workers.audio_worker.enqueue_command(AudioCommand('play_welcome'))
+    workers.audio_worker.enqueue_command(AudioCommand('crickets_play'))
 
     # Main processing loop
     while cap.isOpened() and not stop_event.is_set():
@@ -719,7 +719,7 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
             snapshot
         )
 
-        sleep_state = update_sleep_mode(components, cap, gesture_loc, sleep_state, snapshot)
+        sleep_state = update_sleep_mode(cap, gesture_loc, sleep_state, snapshot)
 
         # Draw UI overlay
         t = time.time()
@@ -766,24 +766,24 @@ def stop_all_sounds(components):
     Stop all currently playing sounds.
     
     Args:
-        components (dict): System components containing audio players
+        components (Components): System components containing audio players
     """
     logger.info("Stopping all sounds...")
-    
+
     # Stop ambient sounds
     try:
-        components['heartbeat_player'].pause_sound()
+        components.heartbeat_player.pause_sound()
     except Exception as e:
         logger.debug(f"Error stopping heartbeat: {e}")
-    
+
     try:
-        components['crickets_player'].pause_sound()
+        components.crickets_player.pause_sound()
     except Exception as e:
         logger.debug(f"Error stopping crickets: {e}")
-    
+
     # Stop all zone audio player sounds (includes welcome, goodbye, description, zones)
     try:
-        components['camio_player'].stop_all()
+        components.camio_player.stop_all()
     except Exception as e:
         logger.debug(f"Error stopping camio_player: {e}")
 
@@ -794,14 +794,14 @@ def cleanup(cap, components, workers):
 
     Args:
         cap: Camera capture object
-        components (dict): System components
-        workers (dict): Worker threads
+        components (Components): System components
+        workers (Workers): Worker threads
     """
     logger.info("Cleaning up resources...")
 
     # Save collected tap data if enabled
     try:
-        pose_detector = components.get('pose_detector')
+        pose_detector = components.pose_detector
         if pose_detector and hasattr(pose_detector, 'data_collector'):
             collector = pose_detector.data_collector
             logger.debug(f"Data collector found: enabled={collector.enabled}, "
@@ -825,14 +825,14 @@ def cleanup(cap, components, workers):
     stop_all_sounds(components)
     
     # Clear any pending audio commands in the queue
-    workers['audio_worker'].clear_queue()
+    workers.audio_worker.clear_queue()
 
     # Play goodbye using AudioWorker's blocking method (cleaner architecture)
     # This method bypasses the async queue and returns a player object
     try:
         logger.info("Playing goodbye message via AudioWorker blocking method...")
         
-        goodbye_player = workers['audio_worker'].play_goodbye_blocking()
+        goodbye_player = workers.audio_worker.play_goodbye_blocking()
         logger.info(f"Goodbye player created: {goodbye_player}")
         
         # Keep pyglet event loop running so audio can actually play
@@ -861,14 +861,14 @@ def cleanup(cap, components, workers):
 
     # Stop worker threads
     logger.info("Stopping worker threads...")
-    workers['pose_worker'].stop()
-    workers['sift_worker'].stop()
-    workers['audio_worker'].stop()
+    workers.pose_worker.stop()
+    workers.sift_worker.stop()
+    workers.audio_worker.stop()
 
     # Wait for threads to exit
-    workers['pose_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
-    workers['sift_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
-    workers['audio_worker'].join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+    workers.pose_worker.join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+    workers.sift_worker.join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
+    workers.audio_worker.join(timeout=WorkerConfig.THREAD_SHUTDOWN_TIMEOUT)
 
     # Release camera and close windows
     cap.release()
@@ -902,7 +902,7 @@ if __name__ == "__main__":
 
     # Initialize system
     components = initialize_system(args.input1, cam_port=args.camera)
-    cap = setup_camera(components['cam_port'])
+    cap = setup_camera(components.cam_port)
 
     # Setup shutdown handling
     stop_event = threading.Event()

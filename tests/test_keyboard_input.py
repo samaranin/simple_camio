@@ -1,11 +1,13 @@
 """The 'h' key requests re-detection through the worker, not by poking state."""
 
 import queue
+import threading
 
 import numpy as np
 import pytest
 
 import simple_camio
+from src.core.containers import Components, Workers
 
 
 class FakeDetector:
@@ -33,31 +35,37 @@ class FakeAudioWorker:
 @pytest.fixture
 def rig():
     detector = FakeDetector()
+    components = Components(
+        model={}, cam_port=0, model_detector=detector, pose_detector=None,
+        gesture_detector=None, motion_filter=None, interact=None,
+        camio_player=None, crickets_player=None, heartbeat_player=None,
+    )
+    workers = Workers(
+        audio_worker=FakeAudioWorker(), pose_worker=None,
+        sift_worker=FakeSiftWorker(), pose_queue=queue.Queue(maxsize=1),
+        sift_queue=queue.Queue(maxsize=1), lock=threading.Lock(),
+    )
     return {
-        'components': {'model_detector': detector},
-        'workers': {
-            'sift_queue': queue.Queue(maxsize=1),
-            'sift_worker': FakeSiftWorker(),
-            'audio_worker': FakeAudioWorker(),
-        },
+        'components': components,
+        'workers': workers,
         'frame': np.zeros((16, 16, 3), dtype=np.uint8),
     }
 
 
 def test_h_asks_the_worker_to_redetect(rig):
     simple_camio.handle_keyboard_input(
-        ord('h'), _StopEvent(), rig['frame'], rig['workers'], rig['components']
+        ord('h'), _StopEvent(), rig['frame'], rig['workers']
     )
 
-    assert rig['workers']['sift_worker'].redetect_calls == 1
+    assert rig['workers'].sift_worker.redetect_calls == 1
 
 
 def test_h_does_not_touch_detector_state(rig):
     """Those writes raced the worker thread; the worker owns this state now."""
-    detector = rig['components']['model_detector']
+    detector = rig['components'].model_detector
 
     simple_camio.handle_keyboard_input(
-        ord('h'), _StopEvent(), rig['frame'], rig['workers'], rig['components']
+        ord('h'), _StopEvent(), rig['frame'], rig['workers']
     )
 
     assert detector.requires_homography is False
@@ -68,7 +76,7 @@ def test_q_signals_shutdown(rig):
     stop = _StopEvent()
 
     keep_going = simple_camio.handle_keyboard_input(
-        ord('q'), stop, rig['frame'], rig['workers'], rig['components']
+        ord('q'), stop, rig['frame'], rig['workers']
     )
 
     assert keep_going is False

@@ -6,16 +6,18 @@ import numpy as np
 import pytest
 
 import simple_camio
+from src.core.containers import Workers
 from src.core.tracking import TrackingSnapshot
 
 
 @pytest.fixture
 def rig():
     return {
-        'workers': {
-            'sift_queue': queue.Queue(maxsize=1),
-            'pose_queue': queue.Queue(maxsize=1),
-        },
+        'workers': Workers(
+            audio_worker=None, pose_worker=None, sift_worker=None,
+            pose_queue=queue.Queue(maxsize=1), sift_queue=queue.Queue(maxsize=1),
+            lock=None,
+        ),
         'frame': np.zeros((8, 8, 3), dtype=np.uint8),
         'gray': np.zeros((8, 8), dtype=np.uint8),
     }
@@ -23,7 +25,7 @@ def rig():
 
 def _queued_homography(rig):
     """The homography from the single item on the pose queue."""
-    _, H = rig['workers']['pose_queue'].get_nowait()
+    _, H = rig['workers'].pose_queue.get_nowait()
     return H
 
 
@@ -36,7 +38,7 @@ def test_missing_homography_feeds_identity(rig):
     H = _queued_homography(rig)
     assert H is not None
     assert np.array_equal(H, simple_camio.IDENTITY_3)
-    assert rig['workers']['sift_queue'].get_nowait() is rig['gray']
+    assert rig['workers'].sift_queue.get_nowait() is rig['gray']
 
 
 def test_real_homography_reaches_the_pose_queue(rig):
