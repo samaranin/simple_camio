@@ -1540,10 +1540,9 @@ class PoseDetectorMPEnhanced(PoseDetectorMP):
             tuple: (results, orig_w, orig_h)
         """
         # Check if CombinedPoseDetector provided results
-        provided = mp_results
-        if provided is not None:
+        if mp_results is not None:
             try:
-                results, ow, oh = provided
+                results, ow, oh = mp_results
                 if results is not None:
                     return results, ow, oh
             except Exception:
