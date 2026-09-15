@@ -1,0 +1,2 @@
+# Development-only dependencies. Runtime dependencies live in requirements.txt.
+pytest>=8.0,<9.0

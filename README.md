@@ -20,10 +20,9 @@ Simple CamIO can now automatically collect tap detection data while you use the 
 
 **Quick Start:**
 
-1. Enable in `src/config.py`: `TapDetectionConfig.COLLECT_TAP_DATA = True`
-2. Run the program normally: `python simple_camio.py`
-3. Perform taps as usual - data is collected automatically
-4. Train on your data: `python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset`
+1. Run with collection enabled: `python simple_camio.py --collect-tap-data`
+2. Perform taps as usual - data is collected automatically
+3. Train on your data: `python -m src.tap_classifier.train_tap_classifier --train-from-collected --data-dir data/tap_dataset`
 
 For detailed instructions, see [DATA_COLLECTION_GUIDE.md](src/tap_classifier/DATA_COLLECTION_GUIDE.md).
 
@@ -213,6 +212,47 @@ All tunable parameters are centralized in `src/config.py`:
 - Enable `USE_THREADED_DISPLAY=True` for non-blocking display (recommended for high FPS)
 - Adjust `DISPLAY_FRAME_SKIP` to control display rate (less critical with threaded display)
 
+**Runtime overrides:**
+
+A handful of settings can be changed at runtime instead of by editing
+`src/config.py`, via a CLI flag or a `CAMIO_*` environment variable. A flag
+wins over its environment variable, which wins over the class default:
+
+| Flag | Environment variable | Overrides |
+| --- | --- | --- |
+| `--headless` | `CAMIO_HEADLESS=1` | `CameraConfig.HEADLESS` |
+| `--resolution WxH` | `CAMIO_RESOLUTION=WxH` | `CameraConfig.DEFAULT_WIDTH`/`DEFAULT_HEIGHT` |
+| `--camera-backend {any,dshow,msmf,v4l2}` | `CAMIO_CAMERA_BACKEND=...` | `CameraConfig.BACKEND` |
+| `--collect-tap-data` | `CAMIO_COLLECT_TAP_DATA=1` | `TapDetectionConfig.COLLECT_TAP_DATA` |
+| `--log-level {DEBUG,INFO,WARNING,ERROR}` | `CAMIO_LOG_LEVEL=...` | the root logger's level |
+
+Run `python simple_camio.py --help` for the full flag list.
+
+## Zone narration
+
+Each hotspot's spoken description is generated, not recorded: `generate_audio`
+reads a hotspot's `textDescription` (and, for the map-level clip, the model's
+`mapDescriptionText`) and synthesizes a WAV with Piper, then rewrites the
+model's `audioDescription` / `map_description` to point at it. Only missing
+audio is produced - existing clips are left alone unless `--force` is passed.
+
+```powershell
+python -m src.tts.generate_audio --input1 models/UkraineMap/UkraineMap.json
+```
+
+This requires the `piper-tts` package and a downloaded voice model - install
+with `uv pip install --python .venv/bin/python -r requirements-tts.txt`; it
+is not in `requirements.txt` because it has no wheel for 32-bit Raspberry Pi
+OS. See [docs/tts-setup.md](docs/tts-setup.md) for installing Piper and
+fetching the `uk_UA-ukrainian_tts-medium` voice used by the bundled maps.
+
+The generated WAVs are not committed to the repository - they are build
+output from text that already lives in the model JSON. A map that ships
+without its `tts/` audio is not broken: `ZoneAudioPlayer` synthesizes
+whatever clips are missing the first time the model loads, so a fresh clone
+or a map without pre-generated narration still speaks, at the cost of a
+short delay on that first load.
+
 ## Troubleshooting
 
 **Map not detected:**
@@ -223,7 +263,7 @@ All tunable parameters are centralized in `src/config.py`:
 
 **Taps not detected:**
 - Verify your pointing gesture (flat hand, extended index finger)
-- Enable debug logging: change `level` in the `logging.basicConfig(...)` call near the top of `simple_camio.py`
+- Enable debug logging: `python simple_camio.py --log-level DEBUG`
 - Check `scale_factor` values in logs (should be 0.35-1.0)
 - Try collecting real-world data and retraining the classifier
 

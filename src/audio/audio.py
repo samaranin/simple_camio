@@ -19,6 +19,8 @@ import os
 import sys
 import logging
 
+from src.config import TTSConfig
+
 logger = logging.getLogger(__name__)
 
 # Backend selection: pyglet when a display is reachable, else pygame.
@@ -186,61 +188,117 @@ class ZoneAudioPlayer:
         self.sound_files = {}
         self.hotspots = {}
         self.enable_blips = False
-        
+
         if USE_PYGLET:
             import pyglet.media
             self.player = pyglet.media.Player()
-            self.welcome_player = None
-            self.goodbye_player = None
-            
-            # Load blip sound for zone transitions
-            self.blip_sound = pyglet.media.load(self.model['blipsound'], streaming=False)
-            
-            # Load map description if available
-            if "map_description" in self.model:
-                self.map_description = pyglet.media.load(self.model['map_description'], streaming=False)
-                self.have_played_description = False
-            else:
-                self.have_played_description = True
-            
-            # Load welcome and goodbye messages
-            self.welcome_message = pyglet.media.load(self.model['welcome_message'], streaming=False)
-            self.goodbye_message = pyglet.media.load(self.model['goodbye_message'], streaming=False)
-            
-        elif USE_PYGAME:
-            import pygame
-            self.player = None
-            self.welcome_player = None
-            self.goodbye_player = None
-            self.current_channel = None  # Track playing channel
-            
-            # Load blip sound
-            self.blip_sound = pygame.mixer.Sound(self.model['blipsound'])
-            
-            # Load map description if available
-            if "map_description" in self.model:
-                self.map_description = pygame.mixer.Sound(self.model['map_description'])
-                self.have_played_description = False
-            else:
-                self.have_played_description = True
-            
-            # Load welcome and goodbye messages
-            self.welcome_message = pygame.mixer.Sound(self.model['welcome_message'])
-            self.goodbye_message = pygame.mixer.Sound(self.model['goodbye_message'])
-            
         else:
-            logger.warning("No audio backend - zone audio player disabled")
             self.player = None
-            self.blip_sound = None
-            self.map_description = None
-            self.welcome_message = None
-            self.goodbye_message = None
-            self.have_played_description = True
+        self.welcome_player = None
+        self.goodbye_player = None
+        self.current_channel = None
+
+        self._synthesize_missing()
+
+        self.blip_sound = self._load_sound(self.model.get('blipsound'), 'blip sound')
+        self.map_description = self._load_sound(
+            self.model.get('map_description'), 'map description')
+        self.have_played_description = self.map_description is None
+        self.welcome_message = self._load_sound(
+            self.model.get('welcome_message'), 'welcome message')
+        self.goodbye_message = self._load_sound(
+            self.model.get('goodbye_message'), 'goodbye message')
 
         # Load audio files for each hotspot
         self._load_hotspot_audio()
 
         logger.info(f"Initialized zone audio player ({AUDIO_BACKEND}) with {len(self.hotspots)} hotspots")
+
+    def _synthesize_missing(self):
+        """
+        Fill in narration audio that is absent, before anything is loaded.
+
+        Runs once at construction rather than on demand, so a zone never waits for
+        synthesis while a finger is resting on it. Writes only audio files - a
+        device in the field does not rewrite its own configuration - at whatever
+        destination model_audio.output_path() names, the same module the offline
+        generator CLI uses. For a model whose audioDescription/map_description
+        already point inside model_audio's generated subdirectory (as every model
+        that has already been through the CLI does), that destination is the
+        literal path the JSON names, so nothing changes for them; a model that
+        still names an un-generated path elsewhere (e.g. Audio/X.mp3) gets its
+        clip written under Audio/tts/X.wav instead of as WAV bytes under the
+        literal .mp3 name.
+
+        model_audio.pending() also owns the missing-file test, so this and the
+        CLI cannot drift on what counts as "already generated".
+
+        Every failure here is logged and tolerated. The player continues with
+        whatever files do exist.
+        """
+        if not TTSConfig.RUNTIME_FALLBACK:
+            return
+
+        # Lazy: Piper may not be installed, and that must not stop the app starting.
+        from src.tts import engine, model_audio
+
+        todo = model_audio.pending(model_audio.narration_entries(self.model))
+        if not todo:
+            return
+
+        logger.info(f"{len(todo)} narration clip(s) missing - synthesizing")
+        jobs = [
+            engine.SynthesisJob(text=entry.text, output_path=model_audio.output_path(entry))
+            for entry in todo
+        ]
+
+        def report(done, total, job):
+            logger.info(f"synthesizing {done}/{total}: {job.output_path.name}")
+
+        try:
+            _, failed = engine.synthesize(jobs, progress=report)
+        except engine.TTSUnavailable as e:
+            logger.warning(f"Cannot synthesize the missing narration: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Synthesis failed unexpectedly: {e}", exc_info=True)
+            return
+
+        for job in failed:
+            logger.warning(
+                f"No audio for {job.output_path.name}; that zone will stay silent")
+
+    def _load_sound(self, path, label=None):
+        """
+        Load one audio file with whichever backend is active.
+
+        Args:
+            path (str): Path to the audio file.
+            label (str, optional): Name to use in log messages.
+
+        Returns:
+            The backend's sound object, or None when the path is empty, the file is
+            absent, or no backend is available. Callers must tolerate None: one
+            silent clip is survivable where an exception would end the session.
+        """
+        if not path:
+            return None
+
+        label = label or path
+        if not os.path.exists(path):
+            logger.warning(f"Audio file not found: {path}")
+            return None
+
+        try:
+            if USE_PYGLET:
+                import pyglet.media
+                return pyglet.media.load(path, streaming=False)
+            if USE_PYGAME:
+                import pygame
+                return pygame.mixer.Sound(path)
+        except Exception as e:
+            logger.error(f"Could not load {label}: {e}")
+        return None
 
     def _load_hotspot_audio(self):
         """Load audio files for all hotspots defined in the model."""
@@ -252,19 +310,10 @@ class ZoneAudioPlayer:
 
             self.hotspots[key] = hotspot
 
-            # Load audio file if it exists
-            if os.path.exists(hotspot['audioDescription']):
-                if USE_PYGLET:
-                    import pyglet.media
-                    self.sound_files[key] = pyglet.media.load(
-                        hotspot['audioDescription'],
-                        streaming=False
-                    )
-                elif USE_PYGAME:
-                    import pygame
-                    self.sound_files[key] = pygame.mixer.Sound(hotspot['audioDescription'])
-            else:
-                logger.warning(f"Audio file not found: {hotspot['audioDescription']}")
+            sound = self._load_sound(
+                hotspot.get('audioDescription'), hotspot.get('textDescription'))
+            if sound is not None:
+                self.sound_files[key] = sound
 
     def set_zone_volume(self, volume):
         """
@@ -410,9 +459,11 @@ class ZoneAudioPlayer:
             self.prev_zone_name = None
             return
 
-        # Get zone name and play audio if zone changed
+        # Get zone name and play audio if zone changed. A double-tap is an
+        # explicit "say that again", so it ignores the change check - otherwise
+        # the one gesture meant for repeating a zone could never repeat it.
         zone_name = self.hotspots[zone]['textDescription']
-        if self.prev_zone_name != zone_name:
+        if status == 'double_tap' or self.prev_zone_name != zone_name:
             self._play_zone_audio(zone)
             self.prev_zone_name = zone_name
 

@@ -12,6 +12,7 @@ import cv2 as cv
 import logging
 from src.config import WorkerConfig, SIFTConfig
 from src.core.utils import normalize_gesture_location
+from src.core.tracking import TrackingSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,11 @@ class SIFTWorker(threading.Thread):
         self._last_validation_ts = 0.0
         self.stop_event = stop_event
 
+        # Snapshot of the detector's tracking state, for consumers on other
+        # threads. Read it only while holding self.lock.
+        self.snapshot = TrackingSnapshot()
+        self._generation = 0
+
         logger.info("Initialized SIFT worker")
 
     def run(self):
@@ -310,6 +316,7 @@ class SIFTWorker(threading.Thread):
                             self.sift_detector.requires_homography = True
                             self.sift_detector.last_rect_pts = None
                         else:
+                            self._publish()
                             continue
 
                 # Need to detect/re-detect homography
@@ -348,7 +355,12 @@ class SIFTWorker(threading.Thread):
                         if retval and H is not None:
                             break
 
+                self._publish()
+
             except Exception as e:
+                # _publish() is inside the try on purpose: a raise here used to
+                # escape run(), killing the daemon thread with no log while the
+                # main loop kept redrawing the last snapshot forever.
                 logger.error(f"SIFT worker error: {e}")
 
     def _prepare_detection_attempts(self, frame):
@@ -377,6 +389,37 @@ class SIFTWorker(threading.Thread):
             logger.debug(f"Blur preprocessing failed: {e}")
 
         return attempts
+
+    def _publish(self):
+        """
+        Copy the detector's tracking state into a fresh snapshot.
+
+        Runs on the worker thread, which is the only thread allowed to read the
+        detector's attributes. The homography_updated flag is consumed here and
+        converted into a monotonic counter, so no consumer has to clear it.
+
+        Every attribute is read bare: SIFTModelDetectorMP.__init__ defines all
+        of them, so a missing one is a broken contract that should show up in
+        the log rather than be papered over with a default that yields a
+        plausible but wrong snapshot. run()'s except Exception covers the call.
+        """
+        d = self.sift_detector
+
+        if d.homography_updated:
+            self._generation += 1
+            d.homography_updated = False
+
+        snapshot = TrackingSnapshot(
+            H=d.H,
+            rect_pts=d.last_rect_pts,
+            tracking=not d.requires_homography,
+            age=d.frames_since_last_detection,
+            status_text=d.get_tracking_status(),
+            detect_generation=self._generation,
+        )
+
+        with self.lock:
+            self.snapshot = snapshot
 
     def trigger_redetect(self):
         """Manually trigger re-detection of the template."""

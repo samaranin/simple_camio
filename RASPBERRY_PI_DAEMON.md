@@ -80,6 +80,61 @@ When running in headless mode:
 - Or send SIGTERM: `kill <pid>`
 - The application will perform graceful shutdown
 
+## Zone Narration Audio
+
+Zone narration is generated off-device and shipped as WAV files - see the
+"Zone narration" section of [README.md](README.md) and
+[docs/tts-setup.md](docs/tts-setup.md). Those WAVs are gitignored
+(`models/*/Audio/tts/`, `models/*/Sound/tts/`) because they are build output,
+so a `git clone` on the Pi does **not** bring them along, and the Pi has no
+network at runtime to synthesize them itself. Get them onto the device
+*before* it goes into service, using whichever of the two options below the
+deployment intends:
+
+### Option 1 (recommended): copy the pre-generated audio
+
+Generate the narration on the machine used for development (see
+[docs/tts-setup.md](docs/tts-setup.md)), then copy just the generated
+directories over, preserving the `models/<Map>/...` structure:
+
+```bash
+# Run from the repository root, on the machine that generated the audio.
+# --relative (with the models/./ marker) recreates the models/<Map>/... path
+# under the destination instead of flattening it.
+rsync -av --relative models/./*/Audio/tts models/./*/Sound/tts \
+    pi@raspberrypi.local:/home/pi/simple_camio/
+```
+
+`rsync` reports "No such file or directory" for whichever glob does not
+match on your maps (e.g. a deployment with no `Sound/`-named map) - drop
+that half of the command rather than treating the message as a failure.
+`scp -r` works the same way per-directory if `rsync` is unavailable:
+
+```bash
+scp -r models/UkraineMap/Audio/tts pi@raspberrypi.local:/home/pi/simple_camio/models/UkraineMap/Audio/
+```
+
+With the audio in place, the Pi never needs `piper-tts` or the voice model
+at all: `ZoneAudioPlayer` finds every clip already generated and the runtime
+fallback never triggers.
+
+### Option 2: install Piper on the Pi as a safety net
+
+If you want the Pi to synthesize on its own for any clip that turns out
+missing (`TTSConfig.RUNTIME_FALLBACK`, on by default), install `piper-tts`
+and copy the voice model over as well - this needs the aarch64 wheel, so it
+only works on 64-bit Raspberry Pi OS (see docs/tts-setup.md):
+
+```bash
+uv pip install --python venv/bin/python -r requirements-tts.txt
+rsync -av models/tts_voices/ pi@raspberrypi.local:/home/pi/simple_camio/models/tts_voices/
+```
+
+This is a fallback, not a substitute for Option 1: synthesizing on a Pi 4
+took whole minutes for a model's full clip set during development, so a
+device relying on this alone speaks late (or, per the standing rule, stays
+silent) on its first run with each map.
+
 ## Running as a Systemd Service
 
 ### 1. Installation
@@ -98,6 +153,9 @@ source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Get the zone narration audio onto the device - see "Zone Narration Audio"
+# above; requirements.txt alone does not include it or piper-tts
 
 # Test headless mode
 python simple_camio.py --headless
@@ -127,6 +185,18 @@ Group=myuser
 WorkingDirectory=/opt/simple_camio
 ExecStart=/opt/simple_camio/venv/bin/python /opt/simple_camio/simple_camio.py --headless --input1 /opt/simple_camio/models/UkraineMap/UkraineMap.json
 ```
+
+Settings such as resolution, camera backend, tap-data collection and log
+level can also be set with `CAMIO_*` environment variables instead of
+editing `ExecStart` - add them to the unit with `Environment=`:
+
+```ini
+Environment=CAMIO_RESOLUTION=640x480
+Environment=CAMIO_LOG_LEVEL=DEBUG
+```
+
+See the "Runtime overrides" table in the main README for the full list of
+flags and their `CAMIO_*` equivalents.
 
 ### 3. Install the Service
 
