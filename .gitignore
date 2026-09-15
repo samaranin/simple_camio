@@ -38,3 +38,8 @@ models/tts_voices/
 # would leak its generated WAVs into `git status`.
 models/*/Audio/tts/
 models/*/Sound/tts/
+
+# Field-test captures from the Pi: systemd journals, timing dumps, the
+# throwaway runner that produced them. Measurement data about one run, kept
+# locally - conclusions belong in docs/ instead.
+logs/
