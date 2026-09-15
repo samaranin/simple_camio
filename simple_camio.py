@@ -218,8 +218,8 @@ def feed_worker_queues(frame, gray, workers, snapshot):
 
 def mark_hand_missing(hand_state, audio_worker):
     """
-    Count a frame with no usable finger position, tearing the hand state down
-    only once several of them have passed.
+    Note a frame with no usable finger position, tearing the hand state down
+    only once the position has been missing for longer than the grace window.
 
     Both callers mean the same thing - an invalid gesture and a lost map
     homography each leave the loop with no finger position this frame. Acting
@@ -234,14 +234,17 @@ def mark_hand_missing(hand_state, audio_worker):
     if not hand_state['was_detected']:
         return
 
-    hand_state['missing_frames'] += 1
-    if hand_state['missing_frames'] < InteractionConfig.HAND_LOSS_GRACE_FRAMES:
+    now = time.time()
+    if not hand_state['missing_since']:
+        hand_state['missing_since'] = now
+    if now - hand_state['missing_since'] < InteractionConfig.HAND_LOSS_GRACE_SECONDS:
         return
 
     audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
     audio_worker.enqueue_command(AudioCommand('crickets_play'))
     hand_state['was_detected'] = False
     hand_state['first_detected_ts'] = 0.0
+    hand_state['missing_since'] = 0.0
 
 
 def process_gestures_and_audio(gesture_loc, gesture_status, components,
@@ -270,7 +273,7 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
         return last_double_tap_ts, hand_state
 
     # Hand detected
-    hand_state['missing_frames'] = 0
+    hand_state['missing_since'] = 0.0
     if not hand_state['was_detected']:
         # Hand just appeared - pause crickets, play map description, start heartbeat
         audio_worker.enqueue_command(AudioCommand('crickets_pause'))
@@ -692,7 +695,7 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
         'was_detected': False,         # Whether hand was detected in previous frame
         'description_played': False,   # Whether map description has been played once
         'first_detected_ts': 0.0,      # Timestamp when hand was first detected (for cooldown)
-        'missing_frames': 0            # Consecutive frames with no finger position
+        'missing_since': 0.0           # When the finger position went missing
     }
     sleep_state = {
         'active': False,

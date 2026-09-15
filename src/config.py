@@ -229,12 +229,14 @@ class InteractionConfig:
     # Z-axis threshold for touch detection (cm)
     Z_THRESHOLD = 2.0
 
-    # Consecutive frames with no usable finger position before the hand counts
-    # as gone. The pose worker republishes ~14 times a second while the main
-    # loop polls it at ~30, so a single frame where MediaPipe loses the hand
-    # used to restart the whole "hand appeared" scenario - measured 136 times
-    # in a 6-minute session on the Pi. Raise it if the detector is slower.
-    HAND_LOSS_GRACE_FRAMES = 3
+    # How long the finger position may go missing before the hand counts as
+    # gone. A 6-minute Pi session logged 136 dropouts: 97 of them lasted under
+    # 0.1 s and the median was 3 ms - MediaPipe losing the hand for a frame or
+    # two while it was still on the map. Acting on those restarted the whole
+    # "hand appeared" scenario. 0.35 s covers 116 of the 136 and still starts
+    # the crickets a third of a second after a real hand lift. Seconds, not
+    # frames: the main loop runs slower on a Pi 4 than on the Pi 5 measured.
+    HAND_LOSS_GRACE_SECONDS = 0.35
 
 
 # ==================== SIFT Detection Configuration ====================

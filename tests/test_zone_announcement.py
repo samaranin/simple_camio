@@ -1,19 +1,21 @@
 """
 Why a zone stays silent when it should speak.
 
-A 6-minute session on the Pi logged 136 tracker resets - one per frame where
-MediaPipe briefly lost the hand - and 116 announcements suppressed as
-`same_name` against 76 that played. In the 0.8-2s window right after a reset
-the ratio was 39 suppressed to 10 played. Both halves are covered here: the
-main loop no longer treats a single dropped frame as the hand leaving, and a
-double-tap no longer loses to the change check.
+A 6-minute session on the Pi logged 136 tracker resets - one per dropout where
+MediaPipe briefly lost the hand, 97 of them under 0.1 s - and 116
+announcements suppressed as `same_name` against 76 that played. In the 0.8-2s
+window right after a reset the ratio was 39 suppressed to 10 played. Both
+halves are covered here: the main loop no longer treats a momentary dropout as
+the hand leaving, and a double-tap no longer loses to the change check.
 """
+
+import time
 
 import simple_camio
 from src.audio.audio import ZoneAudioPlayer
 from src.config import InteractionConfig
 
-GRACE = InteractionConfig.HAND_LOSS_GRACE_FRAMES
+GRACE = InteractionConfig.HAND_LOSS_GRACE_SECONDS
 
 
 class FakeAudioWorker:
@@ -26,29 +28,30 @@ class FakeAudioWorker:
         self.commands.append(command.command_type)
 
 
-def _hand_state(**overrides):
-    state = {
+def _hand_state(missing_for=None):
+    """A tracked hand, optionally already missing for that many seconds."""
+    return {
         'was_detected': True,
         'description_played': True,
         'first_detected_ts': 100.0,
-        'missing_frames': 0,
+        'missing_since': 0.0 if missing_for is None else time.time() - missing_for,
     }
-    state.update(overrides)
-    return state
 
 
 # --- one dropped frame is not the hand leaving ----------------------------
 
 
-def test_a_single_dropped_frame_keeps_the_hand():
+def test_a_momentary_dropout_keeps_the_hand():
     """
     The pose worker republishes ~14 times a second while the loop polls at ~30,
-    so a dropped detection is routine. Acting on it restarted the whole "hand
-    appeared" scenario and marked the zone under the finger as already spoken.
+    so a dropped detection is routine - the median one lasted 3 ms. Acting on
+    it restarted the whole "hand appeared" scenario and marked the zone under
+    the finger as already spoken.
     """
     state = _hand_state()
     worker = FakeAudioWorker()
 
+    simple_camio.mark_hand_missing(state, worker)
     simple_camio.mark_hand_missing(state, worker)
 
     assert state['was_detected'] is True
@@ -56,32 +59,38 @@ def test_a_single_dropped_frame_keeps_the_hand():
     assert worker.commands == []
 
 
-def test_the_hand_still_leaves_once_the_grace_runs_out():
-    """The other side of the gate, so the test above cannot pass vacuously."""
+def test_the_first_missing_frame_starts_the_clock():
+    """Without a start time the window could never expire."""
     state = _hand_state()
+
+    simple_camio.mark_hand_missing(state, FakeAudioWorker())
+
+    assert state['missing_since'] > 0
+
+
+def test_the_hand_still_leaves_once_the_grace_runs_out():
+    """The other side of the gate, so the tests above cannot pass vacuously."""
+    state = _hand_state(missing_for=GRACE + 0.1)
     worker = FakeAudioWorker()
 
-    for _ in range(GRACE):
-        simple_camio.mark_hand_missing(state, worker)
+    simple_camio.mark_hand_missing(state, worker)
 
     assert state['was_detected'] is False
     assert state['first_detected_ts'] == 0.0
     assert worker.commands == ['heartbeat_pause', 'crickets_play']
 
 
-def test_a_recovered_frame_clears_the_count():
+def test_a_recovered_frame_clears_the_clock():
     """
-    Flicker is GRACE-1 misses, a hit, GRACE-1 misses. Without the reset those
-    would accumulate into a teardown that never actually happened.
+    Flicker is a near-miss, a hit, then another near-miss. Without the reset
+    the second one would inherit the first one's start time and tear down a
+    hand that never actually left.
     """
-    state = _hand_state()
+    state = _hand_state(missing_for=GRACE - 0.05)
     worker = FakeAudioWorker()
 
-    for _ in range(GRACE - 1):
-        simple_camio.mark_hand_missing(state, worker)
-    state['missing_frames'] = 0  # what a valid gesture does
-    for _ in range(GRACE - 1):
-        simple_camio.mark_hand_missing(state, worker)
+    state['missing_since'] = 0.0  # what a valid gesture does
+    simple_camio.mark_hand_missing(state, worker)
 
     assert state['was_detected'] is True
     assert worker.commands == []
@@ -89,10 +98,10 @@ def test_a_recovered_frame_clears_the_count():
 
 def test_crickets_start_once_not_every_frame_the_hand_is_gone():
     """A hand off the map for a minute must not queue a command per frame."""
-    state = _hand_state()
+    state = _hand_state(missing_for=GRACE + 0.1)
     worker = FakeAudioWorker()
 
-    for _ in range(GRACE + 30):
+    for _ in range(30):
         simple_camio.mark_hand_missing(state, worker)
 
     assert worker.commands == ['heartbeat_pause', 'crickets_play']
