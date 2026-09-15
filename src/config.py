@@ -229,6 +229,13 @@ class InteractionConfig:
     # Z-axis threshold for touch detection (cm)
     Z_THRESHOLD = 2.0
 
+    # Consecutive frames with no usable finger position before the hand counts
+    # as gone. The pose worker republishes ~14 times a second while the main
+    # loop polls it at ~30, so a single frame where MediaPipe loses the hand
+    # used to restart the whole "hand appeared" scenario - measured 136 times
+    # in a 6-minute session on the Pi. Raise it if the detector is slower.
+    HAND_LOSS_GRACE_FRAMES = 3
+
 
 # ==================== SIFT Detection Configuration ====================
 class SIFTConfig:

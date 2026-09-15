@@ -73,6 +73,10 @@ desktop.ini
 .claude/
 graphify-out/
 camera_parameters.json
+
+# Field-test captures: journals, timing dumps and the throwaway runner that
+# produced them. Measurement data about a run, not code the app runs.
+logs/
 .env
 .env.*
 *.log

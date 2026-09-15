@@ -23,7 +23,8 @@ logging.basicConfig(
 )
 
 # Import from new modular structure
-from src.config import CameraConfig, AudioConfig, WorkerConfig, UIConfig, TapDetectionConfig
+from src.config import (CameraConfig, AudioConfig, WorkerConfig, UIConfig,
+                        TapDetectionConfig, InteractionConfig)
 from src.core.utils import select_camera_port, load_map_parameters, is_gesture_valid
 from src.audio.audio import AmbientSoundPlayer, ZoneAudioPlayer
 from src.detection.gesture_detection import GestureDetector, MovementMedianFilter
@@ -215,6 +216,34 @@ def feed_worker_queues(frame, gray, workers, snapshot):
             pass
 
 
+def mark_hand_missing(hand_state, audio_worker):
+    """
+    Count a frame with no usable finger position, tearing the hand state down
+    only once several of them have passed.
+
+    Both callers mean the same thing - an invalid gesture and a lost map
+    homography each leave the loop with no finger position this frame. Acting
+    on the first one restarted the "hand just appeared" scenario, which resets
+    the zone filter, begins a fresh cooldown and overwrites prev_zone_name with
+    the zone under the finger, silencing that zone until the finger leaves it.
+
+    Args:
+        hand_state (dict): Hand detection state tracking
+        audio_worker (AudioWorker): Audio worker for non-blocking playback
+    """
+    if not hand_state['was_detected']:
+        return
+
+    hand_state['missing_frames'] += 1
+    if hand_state['missing_frames'] < InteractionConfig.HAND_LOSS_GRACE_FRAMES:
+        return
+
+    audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
+    audio_worker.enqueue_command(AudioCommand('crickets_play'))
+    hand_state['was_detected'] = False
+    hand_state['first_detected_ts'] = 0.0
+
+
 def process_gestures_and_audio(gesture_loc, gesture_status, components,
                                last_double_tap_ts, audio_worker, hand_state):
     """
@@ -236,17 +265,12 @@ def process_gestures_and_audio(gesture_loc, gesture_status, components,
     ZONE_AUDIO_COOLDOWN = 0.8  # Increased to ensure filter stabilizes before playing audio
     
     if not is_gesture_valid(gesture_loc):
-        # No hand detected - switch to crickets
-        if hand_state['was_detected']:
-            audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
-            audio_worker.enqueue_command(AudioCommand('crickets_play'))
-        
-        # Reset hand state
-        hand_state['was_detected'] = False
-        hand_state['first_detected_ts'] = 0.0
+        # No finger position this frame - crickets, but not on the first one
+        mark_hand_missing(hand_state, audio_worker)
         return last_double_tap_ts, hand_state
 
     # Hand detected
+    hand_state['missing_frames'] = 0
     if not hand_state['was_detected']:
         # Hand just appeared - pause crickets, play map description, start heartbeat
         audio_worker.enqueue_command(AudioCommand('crickets_pause'))
@@ -513,11 +537,7 @@ def process_map_detection(components, workers, display_img, rect_flash_remaining
     
     if snapshot.H is None:
         # Map not detected - play ambient crickets
-        if hand_state['was_detected']:
-            workers.audio_worker.enqueue_command(AudioCommand('heartbeat_pause'))
-            workers.audio_worker.enqueue_command(AudioCommand('crickets_play'))
-        hand_state['was_detected'] = False
-        hand_state['first_detected_ts'] = 0.0
+        mark_hand_missing(hand_state, workers.audio_worker)
     else:
         # Draw tracking rectangle
         display_img, rect_flash_remaining = draw_map_tracking(
@@ -671,7 +691,8 @@ def run_main_loop(cap, components, workers, stop_event, headless=False):
     hand_state = {
         'was_detected': False,         # Whether hand was detected in previous frame
         'description_played': False,   # Whether map description has been played once
-        'first_detected_ts': 0.0       # Timestamp when hand was first detected (for cooldown)
+        'first_detected_ts': 0.0,      # Timestamp when hand was first detected (for cooldown)
+        'missing_frames': 0            # Consecutive frames with no finger position
     }
     sleep_state = {
         'active': False,

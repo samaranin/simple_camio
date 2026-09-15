@@ -459,9 +459,11 @@ class ZoneAudioPlayer:
             self.prev_zone_name = None
             return
 
-        # Get zone name and play audio if zone changed
+        # Get zone name and play audio if zone changed. A double-tap is an
+        # explicit "say that again", so it ignores the change check - otherwise
+        # the one gesture meant for repeating a zone could never repeat it.
         zone_name = self.hotspots[zone]['textDescription']
-        if self.prev_zone_name != zone_name:
+        if status == 'double_tap' or self.prev_zone_name != zone_name:
             self._play_zone_audio(zone)
             self.prev_zone_name = zone_name
 
