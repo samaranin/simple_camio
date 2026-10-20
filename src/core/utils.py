@@ -7,10 +7,10 @@ drawing, and other common operations.
 
 import os
 import sys
-import json
 import cv2 as cv
 import numpy as np
 import logging
+from src.map_reader import read_map
 
 logger = logging.getLogger(__name__)
 
@@ -134,18 +134,13 @@ def load_map_parameters(filename):
         sys.exit(1)
 
     try:
-        with open(filename, 'r') as f:
-            map_params = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+        model = read_map(filename)
+    except (ValueError, OSError) as e:
         logger.error(f"Could not read map parameters from {filename}: {e}")
         sys.exit(1)
 
-    if 'model' not in map_params:
-        logger.error(f"Map parameters in {filename} have no 'model' section")
-        sys.exit(1)
-
     logger.info(f"Loaded map parameters from {filename}")
-    return map_params['model']
+    return model
 
 
 # ==================== Drawing Functions ====================

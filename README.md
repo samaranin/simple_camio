@@ -46,6 +46,55 @@ For best performance, we recommend the camera sit above the map to get a fronto-
 
 ## Running Simple CamIO
 
+### Maps exported by the existing maker
+
+The reader accepts the maker's existing loose-file export. Put all four downloads
+in one map folder, keeping their filenames:
+
+```text
+MyMap/
+├── MyMap.json                # Runtime model
+├── MyMap.png                 # RGB zone mask
+├── template.png              # Source image; extension follows the original
+├── MyMap.camio-project.json  # Editable maker project
+└── Audio/tts/                # Generated zone-<id>.wav narration
+```
+
+The folder can be outside the application and can be renamed or moved intact.
+For example, `models/MyMap/Audio/tts/zone-1.wav` in the exported JSON resolves
+inside the folder containing that JSON. The reader passes absolute paths to
+CamIO in memory; it does not rewrite the JSON. Application sounds such as
+`MP3/welcome_message.mp3` resolve from the installed application directory.
+
+Run these commands from the fork directory, using your Python environment:
+
+```bash
+# Check images, zone colors and shared sounds before creating narration
+venv-tts/bin/python -m src.map_reader --input1 /path/MyMap/MyMap.json --allow-missing-audio
+
+# Generate missing narration; use the actual installed Piper executable
+venv-tts/bin/python -m src.tts.generate_audio --input1 /path/MyMap/MyMap.json --piper-bin venv-tts/bin/piper
+
+# Check the completed map, including narration files
+venv-tts/bin/python -m src.map_reader --input1 /path/MyMap/MyMap.json
+
+# Start the main application; it uses the reader automatically
+venv-tts/bin/python simple_camio.py --input1 /path/MyMap/MyMap.json --camera 0
+```
+
+An empty map description disables its audio reference in memory. Zone identity
+comes from the maker's `zone-N` audio filename and color-linked navigation nodes.
+Existing audio can also be found by a unique filename stem, then by a unique
+normalized zone label. Ambiguous matches stop loading with an error. Arbitrary
+renaming of image files or unrelated audio names cannot be inferred reliably.
+Keep the maker filenames for the normal workflow. PNG and JPEG are supported;
+other source formats depend on the installed OpenCV decoder.
+
+For the maker's normal `Audio/tts/*.wav` output, generating narration preserves
+the JSON bytes, including its original `models/<name>/...` paths. Legacy models
+that need a different generated audio format or directory retain the TTS CLI's
+path-update behavior. See [integration status and review findings](docs/map-reader-integration.md).
+
 To run with the default map (UkraineMap):
 ```powershell
 python simple_camio.py

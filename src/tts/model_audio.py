@@ -5,6 +5,7 @@ Knows the shape of a model JSON and nothing else: no Piper, no audio backends, n
 file formatting. That keeps it testable with a plain dict.
 """
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def _is_usable(path):
     run regenerates it instead of leaving the zone silent forever.
     """
     try:
-        return path.stat().st_size >= MIN_VALID_WAV_BYTES
+        return path.is_file() and path.stat().st_size >= MIN_VALID_WAV_BYTES
     except OSError:
         return False
 
@@ -130,16 +131,54 @@ def pending(entries, *, force=False, subdir=None):
     """
     The entries that need synthesizing.
 
-    Skips anything with no text or no path. Skips anything whose output already
-    exists and is large enough to be real audio, unless force is set: existing
-    audio is never replaced by accident. An existing file too small to be a
-    valid WAV is treated as missing (see MIN_VALID_WAV_BYTES), so damage from
+    Skips anything with no text or no path. Reuses either the named recording
+    or its generated output when usable, unless force is set. A file too small
+    to be a valid WAV is treated as missing (see MIN_VALID_WAV_BYTES), so damage from
     an interrupted run self-heals on the next call.
     """
     result = []
     for entry in entries:
         if not entry.text or not entry.audio_path:
             continue
-        if force or not _is_usable(output_path(entry, subdir)):
+        if force or not (_is_usable(Path(entry.audio_path))
+                         or _is_usable(output_path(entry, subdir))):
             result.append(entry)
     return result
+
+
+def conflicting_outputs(entries):
+    """Generated destinations claimed by multiple entries needing a recording.
+
+    Include textless entries and explicitly owned recordings: another entry
+    must not adopt their audio as its generated replacement. Explicitly shared
+    usable recordings remain valid.
+    """
+    claims = Counter()
+    generated = set()
+    for entry in entries:
+        if not entry.audio_path:
+            continue
+        source = Path(entry.audio_path)
+        if _is_usable(source):
+            claims[source] += 1
+        else:
+            target = output_path(entry)
+            claims[target] += 1
+            generated.add(target)
+    return {path for path in generated if claims[path] > 1}
+
+
+def use_generated_audio(model):
+    """Point playback at usable generated clips in memory, preserving recordings."""
+    entries = narration_entries(model)
+    conflicts = conflicting_outputs(entries)
+    for entry in entries:
+        if not entry.audio_path or _is_usable(Path(entry.audio_path)):
+            continue
+        generated = output_path(entry)
+        if generated in conflicts or not _is_usable(generated):
+            continue
+        if entry.kind == 'hotspot':
+            model['hotspots'][entry.index]['audioDescription'] = str(generated)
+        else:
+            model['map_description'] = str(generated)

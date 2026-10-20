@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from src.tts import engine, json_edit, model_audio
+from src.map_reader import resolve_model, planned_path
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,11 @@ def generate_for_model(model_path, *, force=False, voice=None, voices_dir=None,
     Returns:
         int: How many entries failed. 0 means everything asked for was produced.
     """
-    model_path = Path(model_path)
+    model_path = Path(model_path).resolve()
     raw = model_path.read_text(encoding='utf-8')
     document = json.loads(raw)
-    model = document['model']
+    original_model = document['model']
+    model = resolve_model(document, model_path)
 
     entries = model_audio.narration_entries(model)
     for entry in entries:
@@ -82,11 +84,22 @@ def generate_for_model(model_path, *, force=False, voice=None, voices_dir=None,
     for entry, job in zip(todo, jobs):
         if job.output_path not in produced:
             continue
-        new_path = str(job.output_path)
-        if new_path == entry.audio_path:
-            continue
         key = 'audioDescription' if entry.kind == 'hotspot' else 'map_description'
-        text = json_edit.replace_string_value(text, key, entry.audio_path, new_path)
+        old_path = (original_model['hotspots'][entry.index].get('audioDescription')
+                    if entry.kind == 'hotspot' else original_model.get('map_description'))
+        if not old_path:
+            # The reader can infer an ID-owned destination from navigation.
+            # Keep that recovery in memory instead of inserting JSON fields.
+            continue
+        stored_entry = model_audio.NarrationEntry(entry.kind, entry.index, entry.text, old_path)
+        stored_output = model_audio.output_path(stored_entry)
+        # Keep the maker's models/<name>/... strings when they already describe
+        # the generated output. Only actual format/directory changes need edits.
+        new_path = (str(stored_output) if planned_path(str(stored_output), model_path) == job.output_path
+                    else job.output_path.relative_to(model_path.parent).as_posix())
+        if new_path == old_path:
+            continue
+        text = json_edit.replace_string_value(text, key, old_path, new_path)
         if entry.kind == 'hotspot':
             expected['model']['hotspots'][entry.index]['audioDescription'] = new_path
         else:

@@ -209,3 +209,60 @@ def test_the_real_cnap_model_gets_distinct_audio_for_its_shared_source_file(
         p: p.stat().st_mtime_ns for p in real_audio_tts_dir.iterdir()
     } if real_audio_tts_dir.exists() else {}
     assert after_stamps == before_stamps
+
+
+@pytest.mark.parametrize('force', [False, True])
+def test_existing_recording_is_preserved_unless_forced(
+        tmp_path, stub_piper, stub_voice, force):
+    recording = tmp_path / 'Recordings/zone-1.wav'
+    recording.parent.mkdir()
+    original_recording = b'original recording' * 10
+    recording.write_bytes(original_recording)
+    path = tmp_path / 'model.json'
+    path.write_text(json.dumps({'model': {'hotspots': [
+        {'textDescription': 'Зона', 'audioDescription': 'Recordings/zone-1.wav'}
+    ]}}, ensure_ascii=False), encoding='utf-8')
+    before = path.read_bytes()
+    assert _run(path, stub_piper, stub_voice, force=force) == 0
+    generated = recording.parent / 'tts/zone-1.wav'
+    assert generated.is_file() == force
+    assert recording.read_bytes() == original_recording
+    if force:
+        assert json.loads(path.read_text())['model']['hotspots'][0]['audioDescription'] == 'Recordings/tts/zone-1.wav'
+    else:
+        assert path.read_bytes() == before
+
+
+def test_generation_reuses_legacy_description_without_text(tmp_path, stub_piper, stub_voice):
+    recording = tmp_path / 'description.wav'
+    original = b'original description' * 10
+    recording.write_bytes(original)
+    path = tmp_path / 'model.json'
+    path.write_text(json.dumps({'model': {'hotspots': [],
+        'map_description': 'description.wav', 'mapDescriptionText': ''}}))
+    before = path.read_bytes()
+    assert _run(path, stub_piper, stub_voice) == 0
+    assert path.read_bytes() == before
+    assert recording.read_bytes() == original
+    assert not (tmp_path / 'tts').exists()
+
+
+def test_existing_generated_zone_does_not_replace_missing_overview(
+        tmp_path, stub_piper, stub_voice):
+    zone = tmp_path / 'Audio/tts/shared.wav'
+    zone.parent.mkdir(parents=True)
+    original_zone = b'existing zone recording' * 10
+    zone.write_bytes(original_zone)
+    path = tmp_path / 'model.json'
+    path.write_text(json.dumps({'model': {
+        'map_description': 'Audio/shared.mp3', 'mapDescriptionText': 'Опис карти',
+        'hotspots': [{'textDescription': 'Зона', 'audioDescription': 'Audio/shared.mp3'}]
+    }}, ensure_ascii=False), encoding='utf-8')
+    assert _run(path, stub_piper, stub_voice) == 0
+    overview = zone.parent / 'map_description.wav'
+    assert overview.is_file()
+    assert overview.with_suffix('.wav.tmp.txt').read_text(encoding='utf-8') == 'опис карти'
+    assert zone.read_bytes() == original_zone
+    before = path.read_bytes()
+    assert _run(path, stub_piper, stub_voice) == 0
+    assert path.read_bytes() == before
